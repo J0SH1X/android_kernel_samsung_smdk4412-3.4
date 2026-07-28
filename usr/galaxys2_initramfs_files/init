@@ -15,11 +15,6 @@ if busybox grep -q bootmode=2 /proc/cmdline ; then
 
     # recovery boot
 
-    # default to recovery ramdisk bundled with kernel
-    load_image=/stage1/recovery.cpio
-
-    # attempt isorec (isolated recovery) boot
-
     # if the raw /dev/block/platform/dw_mmc/by-name/RECOVERY
     # partition contains valid lzop-compressed data
     if busybox lzop -dc /dev/block/mmcblk0p6 > /stage1/isorec.cpio ; then
@@ -29,7 +24,6 @@ if busybox grep -q bootmode=2 /proc/cmdline ; then
             load_image=/stage1/isorec.cpio
         fi
     fi
-
 fi
 
 busybox cpio -i < ${load_image}
