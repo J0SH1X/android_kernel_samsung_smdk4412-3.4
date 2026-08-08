@@ -157,8 +157,8 @@ static const u16 wm8962_reg[WM8962_MAX_REGISTER + 1] = {
 	[57] = 0x0000,     /* R57    - DAC DSP Mixing (1) */
 	[58] = 0x0000,     /* R58    - DAC DSP Mixing (2) */
 
-	[60] = 0x0300,     /* R60    - DC Servo 0 */
-	[61] = 0x0300,     /* R61    - DC Servo 1 */
+	{ 49, 0x0010 },   /* R49    - Class D Control 1 */
+	{ 51, 0x0003 },   /* R51    - Class D Control 2 */
 
 	[64] = 0x0810,     /* R64    - DC Servo 4 */
 
@@ -331,12 +331,8 @@ static const u16 wm8962_reg[WM8962_MAX_REGISTER + 1] = {
 
 	[15360] = 0x000A,     /* R15360 - DSP2 Coeff RAM 0 */
 
-	[16384] = 0x0000,     /* R16384 - RETUNEADC_SHARED_COEFF_1 */
-	[16385] = 0x0000,     /* R16385 - RETUNEADC_SHARED_COEFF_0 */
-	[16386] = 0x0000,     /* R16386 - RETUNEDAC_SHARED_COEFF_1 */
-	[16387] = 0x0000,     /* R16387 - RETUNEDAC_SHARED_COEFF_0 */
-	[16388] = 0x0000,     /* R16388 - SOUNDSTAGE_ENABLES_1 */
-	[16389] = 0x0000,     /* R16389 - SOUNDSTAGE_ENABLES_0 */
+	{ 17408, 0x0083 },   /* R17408 - HPF_C_1 */
+	{ 17409, 0x98AD },   /* R17409 - HPF_C_0 */
 
 	[16896] = 0x0002,     /* R16896 - HDBASS_AI_1 */
 	[16897] = 0xBD12,     /* R16897 - HDBASS_AI_0 */
@@ -1941,10 +1937,21 @@ static const struct wm8962_reg_access {
 
 static int wm8962_volatile_register(struct snd_soc_codec *codec, unsigned int reg)
 {
-	if (wm8962_reg_access[reg].vol)
-		return 1;
-	else
-		return 0;
+	switch (reg) {
+	case WM8962_CLOCKING1:
+	case WM8962_CLOCKING2:
+	case WM8962_SOFTWARE_RESET:
+	case WM8962_ALC2:
+	case WM8962_THERMAL_SHUTDOWN_STATUS:
+	case WM8962_ADDITIONAL_CONTROL_4:
+	case WM8962_DC_SERVO_6:
+	case WM8962_INTERRUPT_STATUS_1:
+	case WM8962_INTERRUPT_STATUS_2:
+	case WM8962_DSP2_EXECCONTROL:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static int wm8962_readable_register(struct snd_soc_codec *codec, unsigned int reg)
@@ -3276,12 +3283,21 @@ static int wm8962_set_fll(struct snd_soc_codec *codec, int fll_id, int source,
 static int wm8962_mute(struct snd_soc_dai *dai, int mute)
 {
 	struct snd_soc_codec *codec = dai->codec;
-	int val;
+	int val, ret;
 
 	if (mute)
-		val = WM8962_DAC_MUTE;
+		val = WM8962_DAC_MUTE | WM8962_DAC_MUTE_ALT;
 	else
 		val = 0;
+
+	/**
+	 * The DAC mute bit is mirrored in two registers, update both to keep
+	 * the register cache consistent.
+	 */
+	ret = snd_soc_update_bits(codec, WM8962_CLASS_D_CONTROL_1,
+				  WM8962_DAC_MUTE_ALT, val);
+	if (ret < 0)
+		return ret;
 
 	return snd_soc_update_bits(codec, WM8962_ADC_DAC_CONTROL_1,
 				   WM8962_DAC_MUTE, val);
@@ -3930,6 +3946,161 @@ static int wm8962_probe(struct snd_soc_codec *codec)
 
 	return 0;
 
+static int wm8962_remove(struct snd_soc_codec *codec)
+{
+	struct wm8962_priv *wm8962 = snd_soc_codec_get_drvdata(codec);
+	int i;
+
+	if (wm8962->irq)
+		free_irq(wm8962->irq, codec);
+
+	cancel_delayed_work_sync(&wm8962->mic_work);
+
+	wm8962_free_gpio(codec);
+	wm8962_free_beep(codec);
+	for (i = 0; i < ARRAY_SIZE(wm8962->supplies); i++)
+		regulator_unregister_notifier(wm8962->supplies[i].consumer,
+					      &wm8962->disable_nb[i]);
+
+	return 0;
+}
+
+static struct snd_soc_codec_driver soc_codec_dev_wm8962 = {
+	.probe =	wm8962_probe,
+	.remove =	wm8962_remove,
+	.set_bias_level = wm8962_set_bias_level,
+	.set_pll = wm8962_set_fll,
+	.idle_bias_off = true,
+};
+
+/* Improve power consumption for IN4 DC measurement mode */
+static const struct reg_default wm8962_dc_measure[] = {
+	{ 0xfd, 0x1 },
+	{ 0xcc, 0x40 },
+	{ 0xfd, 0 },
+};
+
+static const struct regmap_config wm8962_regmap = {
+	.reg_bits = 16,
+	.val_bits = 16,
+
+	.max_register = WM8962_MAX_REGISTER,
+	.reg_defaults = wm8962_reg,
+	.num_reg_defaults = ARRAY_SIZE(wm8962_reg),
+	.volatile_reg = wm8962_volatile_register,
+	.readable_reg = wm8962_readable_register,
+	.cache_type = REGCACHE_RBTREE,
+};
+
+static __devinit int wm8962_i2c_probe(struct i2c_client *i2c,
+				      const struct i2c_device_id *id)
+{
+	struct wm8962_pdata *pdata = dev_get_platdata(&i2c->dev);
+	struct wm8962_priv *wm8962;
+	unsigned int reg;
+	int ret, i;
+
+	wm8962 = devm_kzalloc(&i2c->dev, sizeof(struct wm8962_priv),
+			      GFP_KERNEL);
+	if (wm8962 == NULL)
+		return -ENOMEM;
+
+	i2c_set_clientdata(i2c, wm8962);
+
+	INIT_DELAYED_WORK(&wm8962->mic_work, wm8962_mic_work);
+	init_completion(&wm8962->fll_lock);
+	wm8962->irq = i2c->irq;
+
+	for (i = 0; i < ARRAY_SIZE(wm8962->supplies); i++)
+		wm8962->supplies[i].supply = wm8962_supply_names[i];
+
+	ret = regulator_bulk_get(&i2c->dev, ARRAY_SIZE(wm8962->supplies),
+				 wm8962->supplies);
+	if (ret != 0) {
+		dev_err(&i2c->dev, "Failed to request supplies: %d\n", ret);
+		goto err;
+	}
+
+	ret = regulator_bulk_enable(ARRAY_SIZE(wm8962->supplies),
+				    wm8962->supplies);
+	if (ret != 0) {
+		dev_err(&i2c->dev, "Failed to enable supplies: %d\n", ret);
+		goto err_get;
+	}
+
+	wm8962->regmap = regmap_init_i2c(i2c, &wm8962_regmap);
+	if (IS_ERR(wm8962->regmap)) {
+		ret = PTR_ERR(wm8962->regmap);
+		dev_err(&i2c->dev, "Failed to allocate regmap: %d\n", ret);
+		goto err_enable;
+	}
+
+	/*
+	 * We haven't marked the chip revision as volatile due to
+	 * sharing a register with the right input volume; explicitly
+	 * bypass the cache to read it.
+	 */
+	regcache_cache_bypass(wm8962->regmap, true);
+
+	ret = regmap_read(wm8962->regmap, WM8962_SOFTWARE_RESET, &reg);
+	if (ret < 0) {
+		dev_err(&i2c->dev, "Failed to read ID register\n");
+		goto err_regmap;
+	}
+	if (reg != 0x6243) {
+		dev_err(&i2c->dev,
+			"Device is not a WM8962, ID %x != 0x6243\n", reg);
+		ret = -EINVAL;
+		goto err_regmap;
+	}
+
+	ret = regmap_read(wm8962->regmap, WM8962_RIGHT_INPUT_VOLUME, &reg);
+	if (ret < 0) {
+		dev_err(&i2c->dev, "Failed to read device revision: %d\n",
+			ret);
+		goto err_regmap;
+	}
+
+	dev_info(&i2c->dev, "customer id %x revision %c\n",
+		 (reg & WM8962_CUST_ID_MASK) >> WM8962_CUST_ID_SHIFT,
+		 ((reg & WM8962_CHIP_REV_MASK) >> WM8962_CHIP_REV_SHIFT)
+		 + 'A');
+
+	regcache_cache_bypass(wm8962->regmap, false);
+
+	ret = wm8962_reset(wm8962);
+	if (ret < 0) {
+		dev_err(&i2c->dev, "Failed to issue reset\n");
+		goto err_regmap;
+	}
+
+	if (pdata && pdata->in4_dc_measure) {
+		ret = regmap_register_patch(wm8962->regmap,
+					    wm8962_dc_measure,
+					    ARRAY_SIZE(wm8962_dc_measure));
+		if (ret != 0)
+			dev_err(&i2c->dev,
+				"Failed to configure for DC mesurement: %d\n",
+				ret);
+	}
+
+	pm_runtime_enable(&i2c->dev);
+	pm_request_idle(&i2c->dev);
+
+	ret = snd_soc_register_codec(&i2c->dev,
+				     &soc_codec_dev_wm8962, &wm8962_dai, 1);
+	if (ret < 0)
+		goto err_regmap;
+
+	regcache_cache_only(wm8962->regmap, true);
+
+	/* The drivers should power up as needed */
+	regulator_bulk_disable(ARRAY_SIZE(wm8962->supplies), wm8962->supplies);
+
+	return 0;
+
+err_regmap:
+	regmap_exit(wm8962->regmap);
 err_enable:
 	regulator_bulk_disable(ARRAY_SIZE(wm8962->supplies), wm8962->supplies);
 err_get:

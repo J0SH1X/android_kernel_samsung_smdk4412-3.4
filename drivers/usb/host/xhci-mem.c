@@ -1183,11 +1183,12 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 		/* Attempt to use the ring cache */
 		if (virt_dev->num_rings_cached == 0)
 			return -ENOMEM;
+		virt_dev->num_rings_cached--;
 		virt_dev->eps[ep_index].new_ring =
 			virt_dev->ring_cache[virt_dev->num_rings_cached];
 		virt_dev->ring_cache[virt_dev->num_rings_cached] = NULL;
-		virt_dev->num_rings_cached--;
-		xhci_reinit_cached_ring(xhci, virt_dev->eps[ep_index].new_ring);
+		xhci_reinit_cached_ring(xhci, virt_dev->eps[ep_index].new_ring,
+					1, type);
 	}
 	virt_dev->eps[ep_index].skip = false;
 	ep_ring = virt_dev->eps[ep_index].new_ring;
@@ -1254,10 +1255,10 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 	 * use Event Data TRBs, and we don't chain in a link TRB on short
 	 * transfers, we're basically dividing by 1.
 	 *
-	 * xHCI 1.0 specification indicates that the Average TRB Length should
-	 * be set to 8 for control endpoints.
+	 * xHCI 1.0 and 1.1 specification indicates that the Average TRB Length
+	 * should be set to 8 for control endpoints.
 	 */
-	if (usb_endpoint_xfer_control(&ep->desc) && xhci->hci_version == 0x100)
+	if (usb_endpoint_xfer_control(&ep->desc) && xhci->hci_version >= 0x100)
 		ep_ctx->tx_info |= cpu_to_le32(AVG_TRB_LENGTH_FOR_EP(8));
 	else
 		ep_ctx->tx_info |=
@@ -1514,6 +1515,16 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 	xhci->cmd_ring = NULL;
 	xhci_dbg(xhci, "Freed command ring\n");
 
+	num_ports = HCS_MAX_PORTS(xhci->hcs_params1);
+	for (i = 0; i < num_ports && xhci->rh_bw; i++) {
+		struct xhci_interval_bw_table *bwt = &xhci->rh_bw[i].bw_table;
+		for (j = 0; j < XHCI_MAX_INTERVAL; j++) {
+			struct list_head *ep = &bwt->interval_bw[j].endpoints;
+			while (!list_empty(ep))
+				list_del_init(ep->next);
+		}
+	}
+
 	for (i = 1; i < MAX_HC_SLOTS; ++i)
 		xhci_free_virt_device(xhci, i);
 
@@ -1545,6 +1556,25 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 
 	scratchpad_free(xhci);
 
+	spin_lock_irqsave(&xhci->lock, flags);
+	list_for_each_entry_safe(dev_info, next, &xhci->lpm_failed_devs, list) {
+		list_del(&dev_info->list);
+		kfree(dev_info);
+	}
+	spin_unlock_irqrestore(&xhci->lock, flags);
+
+	if (!xhci->rh_bw)
+		goto no_bw;
+
+	for (i = 0; i < num_ports; i++) {
+		struct xhci_tt_bw_info *tt, *n;
+		list_for_each_entry_safe(tt, n, &xhci->rh_bw[i].tts, tt_list) {
+			list_del(&tt->tt_list);
+			kfree(tt);
+		}
+	}
+
+no_bw:
 	xhci->num_usb2_ports = 0;
 	xhci->num_usb3_ports = 0;
 	kfree(xhci->usb2_ports);

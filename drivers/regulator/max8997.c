@@ -147,7 +147,7 @@ static int max8997_list_voltage(struct regulator_dev *rdev,
 	if (val > desc->max)
 		return -EINVAL;
 
-	return val * 1000;
+	return val;
 }
 
 static int max8997_list_current(struct regulator_dev *rdev,

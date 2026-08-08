@@ -202,6 +202,13 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 	int err;
 	u32 eax, edx;
 	struct pci_dev *host_bridge;
+	int i;
+
+	/* explicit tjmax table entries override heuristics */
+	for (i = 0; i < ARRAY_SIZE(tjmax_table); i++) {
+		if (strstr(c->x86_model_id, tjmax_table[i].id))
+			return tjmax_table[i].tjmax;
+	}
 
 	/* Early chips have no MSR for TjMax */
 
@@ -210,7 +217,8 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 
 	/* Atom CPUs */
 
-	if (c->x86_model == 0x1c) {
+	if (c->x86_model == 0x1c || c->x86_model == 0x26
+	    || c->x86_model == 0x27) {
 		usemsr_ee = 0;
 
 		host_bridge = pci_get_bus_and_slot(0, PCI_DEVFN(0, 0));
@@ -223,6 +231,9 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 			tjmax = 90000;
 
 		pci_dev_put(host_bridge);
+	} else if (c->x86_model == 0x36) {
+		usemsr_ee = 0;
+		tjmax = 100000;
 	}
 
 	if (c->x86_model > 0xe && usemsr_ee) {

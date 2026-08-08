@@ -829,10 +829,21 @@ static void atmci_start_request(struct atmel_mci *host,
 	iflags |= MCI_CMDRDY;
 	cmd = mrq->cmd;
 	cmdflags = atmci_prepare_command(slot->mmc, cmd);
-	atmci_start_command(host, cmd, cmdflags);
+
+	/*
+	 * DMA transfer should be started before sending the command to avoid
+	 * unexpected errors especially for read operations in SDIO mode.
+	 * Unfortunately, in PDC mode, command has to be sent before starting
+	 * the transfer.
+	 */
+	if (host->submit_data != &atmci_submit_data_dma)
+		atmci_send_command(host, cmd, cmdflags);
 
 	if (data)
 		atmci_submit_data(host);
+
+	if (host->submit_data == &atmci_submit_data_dma)
+		atmci_send_command(host, cmd, cmdflags);
 
 	if (mrq->stop) {
 		host->stop_cmdr = atmci_prepare_command(slot->mmc, mrq->stop);
@@ -921,7 +932,7 @@ static void atmci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	if (ios->clock) {
 		unsigned int clock_min = ~0U;
-		u32 clkdiv;
+		int clkdiv;
 
 		spin_lock_bh(&host->lock);
 		if (!host->mode_reg) {
@@ -944,12 +955,30 @@ static void atmci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		}
 
 		/* Calculate clock divider */
-		clkdiv = DIV_ROUND_UP(host->bus_hz, 2 * clock_min) - 1;
-		if (clkdiv > 255) {
-			dev_warn(&mmc->class_dev,
-				"clock %u too slow; using %lu\n",
-				clock_min, host->bus_hz / (2 * 256));
-			clkdiv = 255;
+		if (host->caps.has_odd_clk_div) {
+			clkdiv = DIV_ROUND_UP(host->bus_hz, clock_min) - 2;
+			if (clkdiv < 0) {
+				dev_warn(&mmc->class_dev,
+					 "clock %u too fast; using %lu\n",
+					 clock_min, host->bus_hz / 2);
+				clkdiv = 0;
+			} else if (clkdiv > 511) {
+				dev_warn(&mmc->class_dev,
+				         "clock %u too slow; using %lu\n",
+				         clock_min, host->bus_hz / (511 + 2));
+				clkdiv = 511;
+			}
+			host->mode_reg = ATMCI_MR_CLKDIV(clkdiv >> 1)
+			                 | ATMCI_MR_CLKODD(clkdiv & 1);
+		} else {
+			clkdiv = DIV_ROUND_UP(host->bus_hz, 2 * clock_min) - 1;
+			if (clkdiv > 255) {
+				dev_warn(&mmc->class_dev,
+				         "clock %u too slow; using %lu\n",
+				         clock_min, host->bus_hz / (2 * 256));
+				clkdiv = 255;
+			}
+			host->mode_reg = ATMCI_MR_CLKDIV(clkdiv);
 		}
 
 		host->mode_reg = MCI_MR_CLKDIV(clkdiv);

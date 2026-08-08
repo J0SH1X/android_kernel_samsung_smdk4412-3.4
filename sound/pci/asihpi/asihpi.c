@@ -783,6 +783,7 @@ static void snd_card_asihpi_timer_function(unsigned long data)
 				ds->drained_count++;
 				if (ds->drained_count > 2) {
 					snd_pcm_stop(s, SNDRV_PCM_STATE_XRUN);
+					snd_pcm_stream_unlock_irqrestore(s, flags);
 					continue;
 				}
 			} else {

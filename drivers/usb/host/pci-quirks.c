@@ -463,6 +463,9 @@ static void __devinit quirk_usb_handoff_ohci(struct pci_dev *pdev)
 {
 	void __iomem *base;
 	u32 control;
+	u32 fminterval = 0;
+	bool no_fminterval = false;
+	int cnt;
 
 	if (!mmio_resource_enabled(pdev, 0))
 		return;
@@ -470,6 +473,13 @@ static void __devinit quirk_usb_handoff_ohci(struct pci_dev *pdev)
 	base = pci_ioremap_bar(pdev, 0);
 	if (base == NULL)
 		return;
+
+	/*
+	 * ULi M5237 OHCI controller locks the whole system when accessing
+	 * the OHCI_FMINTERVAL offset.
+	 */
+	if (pdev->vendor == PCI_VENDOR_ID_AL && pdev->device == 0x5237)
+		no_fminterval = true;
 
 	control = readl(base + OHCI_CONTROL);
 
@@ -504,8 +514,62 @@ static void __devinit quirk_usb_handoff_ohci(struct pci_dev *pdev)
 	writel(~(u32)0, base + OHCI_INTRDISABLE);
 	writel(~(u32)0, base + OHCI_INTRSTATUS);
 
+		/* drive bus reset for at least 50 ms (7.1.7.5) */
+		msleep(50);
+	}
+
+	/* software reset of the controller, preserving HcFmInterval */
+	if (!no_fminterval)
+		fminterval = readl(base + OHCI_FMINTERVAL);
+
+	writel(OHCI_HCR, base + OHCI_CMDSTATUS);
+
+	/* reset requires max 10 us delay */
+	for (cnt = 30; cnt > 0; --cnt) {	/* ... allow extra time */
+		if ((readl(base + OHCI_CMDSTATUS) & OHCI_HCR) == 0)
+			break;
+		udelay(1);
+	}
+
+	if (!no_fminterval)
+		writel(fminterval, base + OHCI_FMINTERVAL);
+
+	/* Now the controller is safely in SUSPEND and nothing can wake it up */
 	iounmap(base);
 }
+
+static const struct dmi_system_id __devinitconst ehci_dmi_nohandoff_table[] = {
+	{
+		/*  Pegatron Lucid (ExoPC) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "EXOPG06411"),
+			DMI_MATCH(DMI_BIOS_VERSION, "Lucid-CE-133"),
+		},
+	},
+	{
+		/*  Pegatron Lucid (Ordissimo AIRIS) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "M11JB"),
+			DMI_MATCH(DMI_BIOS_VERSION, "Lucid-"),
+		},
+	},
+	{
+		/*  Pegatron Lucid (Ordissimo) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "Ordissimo"),
+			DMI_MATCH(DMI_BIOS_VERSION, "Lucid-"),
+		},
+	},
+	{
+		/* HASEE E200 */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HASEE"),
+			DMI_MATCH(DMI_BOARD_NAME, "E210"),
+			DMI_MATCH(DMI_BIOS_VERSION, "6.00"),
+		},
+	},
+	{ }
+};
 
 static void __devinit ehci_bios_handoff(struct pci_dev *pdev,
 					void __iomem *op_reg_base,
@@ -513,14 +577,15 @@ static void __devinit ehci_bios_handoff(struct pci_dev *pdev,
 {
 	int try_handoff = 1, tried_handoff = 0;
 
-	/* The Pegatron Lucid (ExoPC) tablet sporadically waits for 90
-	 * seconds trying the handoff on its unused controller.  Skip
-	 * it. */
-	if (pdev->vendor == 0x8086 && pdev->device == 0x283a) {
-		const char *dmi_bn = dmi_get_system_info(DMI_BOARD_NAME);
-		const char *dmi_bv = dmi_get_system_info(DMI_BIOS_VERSION);
-		if (dmi_bn && !strcmp(dmi_bn, "EXOPG06411") &&
-		    dmi_bv && !strcmp(dmi_bv, "Lucid-CE-133"))
+	/*
+	 * The Pegatron Lucid tablet sporadically waits for 98 seconds trying
+	 * the handoff on its unused controller.  Skip it.
+	 *
+	 * The HASEE E200 hangs when the semaphore is set (bugzilla #77021).
+	 */
+	if (pdev->vendor == 0x8086 && (pdev->device == 0x283a ||
+			pdev->device == 0x27cc)) {
+		if (dmi_check_system(ehci_dmi_nohandoff_table))
 			try_handoff = 0;
 	}
 

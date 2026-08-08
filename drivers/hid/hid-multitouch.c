@@ -81,6 +81,32 @@ struct mt_class {
 	__s32 sn_height;	/* Signal/noise ratio for height events */
 	__s32 sn_pressure;	/* Signal/noise ratio for pressure events */
 	__u8 maxcontacts;
+	bool is_indirect;	/* true for touchpads */
+};
+
+struct mt_fields {
+	unsigned usages[HID_MAX_FIELDS];
+	unsigned int length;
+};
+
+struct mt_device {
+	struct mt_slot curdata;	/* placeholder of incoming data */
+	struct mt_class mtclass;	/* our mt device class */
+	struct mt_fields *fields;	/* temporary placeholder for storing the
+					   multitouch fields */
+	unsigned last_field_index;	/* last field index of the report */
+	unsigned last_slot_field;	/* the last field of a slot */
+	__s16 inputmode;		/* InputMode HID feature, -1 if non-existent */
+	__s16 maxcontact_report_id;	/* Maximum Contact Number HID feature,
+				   -1 if non-existent */
+	__u8 num_received;	/* how many contacts we received */
+	__u8 num_expected;	/* expected last contact index */
+	__u8 maxcontacts;
+	__u8 touches_by_report;	/* how many touches are present in one report:
+				* 1 means we should use a serial protocol
+				* > 1 means hybrid (multitouch) protocol */
+	bool curvalid;		/* is the current contact valid? */
+	struct mt_slot *slots;
 };
 
 /* classes of device behavior */

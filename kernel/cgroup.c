@@ -1063,15 +1063,16 @@ static int cgroup_show_options(struct seq_file *seq, struct dentry *dentry)
 
 	mutex_lock(&cgroup_root_mutex);
 	for_each_subsys(root, ss)
-		seq_printf(seq, ",%s", ss->name);
+		seq_show_option(seq, ss->name, NULL);
 	if (test_bit(ROOT_NOPREFIX, &root->flags))
 		seq_puts(seq, ",noprefix");
 	if (strlen(root->release_agent_path))
-		seq_printf(seq, ",release_agent=%s", root->release_agent_path);
+		seq_show_option(seq, "release_agent",
+				root->release_agent_path);
 	if (clone_children(&root->top_cgroup))
 		seq_puts(seq, ",clone_children");
 	if (strlen(root->name))
-		seq_printf(seq, ",name=%s", root->name);
+		seq_show_option(seq, "name", root->name);
 	mutex_unlock(&cgroup_root_mutex);
 	return 0;
 }
@@ -3887,6 +3888,11 @@ static int cgroup_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	struct cgroup *c_parent = dentry->d_parent->d_fsdata;
 
+	/* Do not accept '\n' to prevent making /proc/<pid>/cgroup unparsable.
+	 */
+	if (strchr(dentry->d_name.name, '\n'))
+		return -EINVAL;
+
 	/* the vfs holds inode->i_mutex already */
 	return cgroup_create(c_parent, dentry, mode | S_IFDIR);
 }
@@ -4589,13 +4595,27 @@ void cgroup_fork_callbacks(struct task_struct *child)
  * cgroup_post_fork - called on a new task after adding it to the task list
  * @child: the task in question
  *
- * Adds the task to the list running through its css_set if necessary.
- * Has to be after the task is visible on the task list in case we race
- * with the first call to cgroup_iter_start() - to guarantee that the
- * new task ends up on its list.
+ * Adds the task to the list running through its css_set if necessary and
+ * call the subsystem fork() callbacks.  Has to be after the task is
+ * visible on the task list in case we race with the first call to
+ * cgroup_iter_start() - to guarantee that the new task ends up on its
+ * list.
  */
 void cgroup_post_fork(struct task_struct *child)
 {
+	int i;
+
+	/*
+	 * use_task_css_set_links is set to 1 before we walk the tasklist
+	 * under the tasklist_lock and we read it here after we added the child
+	 * to the tasklist under the tasklist_lock as well. If the child wasn't
+	 * yet in the tasklist when we walked through it from
+	 * cgroup_enable_task_cg_lists(), then use_task_css_set_links value
+	 * should be visible now due to the paired locking and barriers implied
+	 * by LOCK/UNLOCK: it is written before the tasklist_lock unlock
+	 * in cgroup_enable_task_cg_lists() and read here after the tasklist_lock
+	 * lock on fork.
+	 */
 	if (use_task_css_set_links) {
 		write_lock(&css_set_lock);
 		if (list_empty(&child->cg_list)) {
@@ -4613,7 +4633,21 @@ void cgroup_post_fork(struct task_struct *child)
 		}
 		write_unlock(&css_set_lock);
 	}
+
+	/*
+	 * Call ss->fork().  This must happen after @child is linked on
+	 * css_set; otherwise, @child might change state between ->fork()
+	 * and addition to css_set.
+	 */
+	if (need_forkexit_callback) {
+		for (i = 0; i < CGROUP_BUILTIN_SUBSYS_COUNT; i++) {
+			struct cgroup_subsys *ss = subsys[i];
+			if (ss->fork)
+				ss->fork(child);
+		}
+	}
 }
+
 /**
  * cgroup_exit - detach cgroup from exiting task
  * @tsk: pointer to task_struct of exiting process

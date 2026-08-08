@@ -537,22 +537,10 @@ int usb_match_device(struct usb_device *dev, const struct usb_device_id *id)
 }
 
 /* returns 0 if no match, 1 if match */
-int usb_match_one_id(struct usb_interface *interface,
-		     const struct usb_device_id *id)
+int usb_match_one_id_intf(struct usb_device *dev,
+			  struct usb_host_interface *intf,
+			  const struct usb_device_id *id)
 {
-	struct usb_host_interface *intf;
-	struct usb_device *dev;
-
-	/* proc_connectinfo in devio.c may call us with id == NULL. */
-	if (id == NULL)
-		return 0;
-
-	intf = interface->cur_altsetting;
-	dev = interface_to_usbdev(interface);
-
-	if (!usb_match_device(dev, id))
-		return 0;
-
 	/* The interface class, subclass, and protocol should never be
 	 * checked for a match if the device class is Vendor Specific,
 	 * unless the match record specifies the Vendor ID. */
@@ -576,6 +564,26 @@ int usb_match_one_id(struct usb_interface *interface,
 		return 0;
 
 	return 1;
+}
+
+/* returns 0 if no match, 1 if match */
+int usb_match_one_id(struct usb_interface *interface,
+		     const struct usb_device_id *id)
+{
+	struct usb_host_interface *intf;
+	struct usb_device *dev;
+
+	/* proc_connectinfo in devio.c may call us with id == NULL. */
+	if (id == NULL)
+		return 0;
+
+	intf = interface->cur_altsetting;
+	dev = interface_to_usbdev(interface);
+
+	if (!usb_match_device(dev, id))
+		return 0;
+
+	return usb_match_one_id_intf(dev, intf, id);
 }
 EXPORT_SYMBOL_GPL(usb_match_one_id);
 
@@ -920,8 +928,7 @@ EXPORT_SYMBOL_GPL(usb_deregister);
  * it doesn't support pre_reset/post_reset/reset_resume or
  * because it doesn't support suspend/resume.
  *
- * The caller must hold @intf's device's lock, but not its pm_mutex
- * and not @intf->dev.sem.
+ * The caller must hold @intf's device's lock, but not @intf's lock.
  */
 void usb_forced_unbind_intf(struct usb_interface *intf)
 {
@@ -934,16 +941,37 @@ void usb_forced_unbind_intf(struct usb_interface *intf)
 	intf->needs_binding = 1;
 }
 
+/*
+ * Unbind drivers for @udev's marked interfaces.  These interfaces have
+ * the needs_binding flag set, for example by usb_resume_interface().
+ *
+ * The caller must hold @udev's device lock.
+ */
+static void unbind_marked_interfaces(struct usb_device *udev)
+{
+	struct usb_host_config	*config;
+	int			i;
+	struct usb_interface	*intf;
+
+	config = udev->actconfig;
+	if (config) {
+		for (i = 0; i < config->desc.bNumInterfaces; ++i) {
+			intf = config->interface[i];
+			if (intf->dev.driver && intf->needs_binding)
+				usb_forced_unbind_intf(intf);
+		}
+	}
+}
+
 /* Delayed forced unbinding of a USB interface driver and scan
  * for rebinding.
  *
- * The caller must hold @intf's device's lock, but not its pm_mutex
- * and not @intf->dev.sem.
+ * The caller must hold @intf's device's lock, but not @intf's lock.
  *
  * Note: Rebinds will be skipped if a system sleep transition is in
  * progress and the PM "complete" callback hasn't occurred yet.
  */
-void usb_rebind_intf(struct usb_interface *intf)
+static void usb_rebind_intf(struct usb_interface *intf)
 {
 	int rc;
 
@@ -963,6 +991,41 @@ void usb_rebind_intf(struct usb_interface *intf)
 		if (rc < 0)
 			dev_warn(&intf->dev, "rebind failed: %d\n", rc);
 	}
+}
+
+/*
+ * Rebind drivers to @udev's marked interfaces.  These interfaces have
+ * the needs_binding flag set.
+ *
+ * The caller must hold @udev's device lock.
+ */
+static void rebind_marked_interfaces(struct usb_device *udev)
+{
+	struct usb_host_config	*config;
+	int			i;
+	struct usb_interface	*intf;
+
+	config = udev->actconfig;
+	if (config) {
+		for (i = 0; i < config->desc.bNumInterfaces; ++i) {
+			intf = config->interface[i];
+			if (intf->needs_binding)
+				usb_rebind_intf(intf);
+		}
+	}
+}
+
+/*
+ * Unbind all of @udev's marked interfaces and then rebind all of them.
+ * This ordering is necessary because some drivers claim several interfaces
+ * when they are first probed.
+ *
+ * The caller must hold @udev's device lock.
+ */
+void usb_unbind_and_rebind_marked_interfaces(struct usb_device *udev)
+{
+	unbind_marked_interfaces(udev);
+	rebind_marked_interfaces(udev);
 }
 
 #ifdef CONFIG_PM
@@ -1326,6 +1389,19 @@ int usb_suspend(struct device *dev, pm_message_t msg)
 }
 
 /* The device lock is held by the PM core */
+int usb_resume_complete(struct device *dev)
+{
+	struct usb_device *udev = to_usb_device(dev);
+
+	/* For PM complete calls, all we do is rebind interfaces
+	 * whose needs_binding flag is set
+	 */
+	if (udev->state != USB_STATE_NOTATTACHED)
+		rebind_marked_interfaces(udev);
+	return 0;
+}
+
+/* The device lock is held by the PM core */
 int usb_resume(struct device *dev, pm_message_t msg)
 {
 	struct usb_device	*udev = to_usb_device(dev);
@@ -1667,6 +1743,18 @@ static int autosuspend_check(struct usb_device *udev)
 		dev_dbg(&udev->dev, "remote wakeup needed for autosuspend\n");
 		return -EOPNOTSUPP;
 	}
+
+	/*
+	 * If the device is a direct child of the root hub and the HCD
+	 * doesn't handle wakeup requests, don't allow autosuspend when
+	 * wakeup is needed.
+	 */
+	if (w && udev->parent == udev->bus->root_hub &&
+			bus_to_hcd(udev->bus)->cant_recv_wakeups) {
+		dev_dbg(&udev->dev, "HCD doesn't handle wakeup requests\n");
+		return -EOPNOTSUPP;
+	}
+
 	udev->do_remote_wakeup = w;
 	return 0;
 }
@@ -1684,10 +1772,18 @@ int usb_runtime_suspend(struct device *dev)
 		return -EAGAIN;
 
 	status = usb_suspend_both(udev, PMSG_AUTO_SUSPEND);
-	/* The PM core reacts badly unless the return code is 0,
-	 * -EAGAIN, or -EBUSY, so always return -EBUSY on an error.
+
+	/* Allow a retry if autosuspend failed temporarily */
+	if (status == -EAGAIN || status == -EBUSY)
+		usb_mark_last_busy(udev);
+
+	/*
+	 * The PM core reacts badly unless the return code is 0,
+	 * -EAGAIN, or -EBUSY, so always return -EBUSY on an error
+	 * (except for root hubs, because they don't suspend through
+	 * an upstream port like other USB devices).
 	 */
-	if (status != 0)
+	if (status != 0 && udev->parent)
 		return -EBUSY;
 	return status;
 }

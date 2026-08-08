@@ -214,8 +214,9 @@ static void dwc3_ep0_stall_and_restart(struct dwc3 *dwc)
 	struct dwc3_ep		*dep = dwc->eps[0];
 
 	/* stall is always issued on EP0 */
-	__dwc3_gadget_ep_set_halt(dwc->eps[0], 1);
-	dwc->eps[0]->flags = DWC3_EP_ENABLED;
+	__dwc3_gadget_ep_set_halt(dep, 1, false);
+	dep->flags = DWC3_EP_ENABLED;
+	dwc->delayed_status = false;
 
 	if (!list_empty(&dep->request_list)) {
 		struct dwc3_request	*req;
@@ -400,7 +401,9 @@ static int dwc3_ep0_handle_feature(struct dwc3 *dwc,
 			dep =  dwc3_wIndex_to_dep(dwc, ctrl->wIndex);
 			if (!dep)
 				return -EINVAL;
-			ret = __dwc3_gadget_ep_set_halt(dep, set);
+			if (set == 0 && (dep->flags & DWC3_EP_WEDGE))
+				break;
+			ret = __dwc3_gadget_ep_set_halt(dep, set, true);
 			if (ret)
 				return -EINVAL;
 			break;
@@ -453,7 +456,6 @@ static int dwc3_ep0_set_config(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
 	u32 cfg;
 	int ret;
 
-	dwc->start_config_issued = false;
 	cfg = le16_to_cpu(ctrl->wValue);
 
 	switch (dwc->dev_state) {

@@ -1001,12 +1001,13 @@ static int __usbhsg_ep_set_halt_wedge(struct usb_ep *ep, int halt, int wedge)
 	unsigned long flags;
 	int ret = -EAGAIN;
 
-	/*
-	 * see
-	 *   CAUTION [*queue handler*]
-	 *   CAUTION [*endpoint queue*]
-	 *   CAUTION [*request complete*]
-	 */
+	if (!pipe)
+		return -EINVAL;
+
+	usbhsg_pipe_disable(uep);
+
+	dev_dbg(dev, "set halt %d (pipe %d)\n",
+		halt, usbhs_pipe_number(pipe));
 
 	/********************  spin lock ********************/
 	lock = usbhsg_trylock(gpriv, &flags);

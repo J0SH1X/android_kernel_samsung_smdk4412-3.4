@@ -1258,8 +1258,14 @@ static int charger_manager_probe(struct platform_device *pdev)
 		goto err_extcon;
 	}
 
-	for (i = 0; desc->psy_charger_stat[i]; i++)
-		/* Counting index only */ ;
+	if (!desc->psy_fuel_gauge) {
+		dev_err(&pdev->dev, "No fuel gauge power supply defined\n");
+		return -EINVAL;
+	}
+
+	/* Counting index only */
+	while (desc->psy_charger_stat[i])
+		i++;
 
 	cm->charger_stat = kzalloc(sizeof(struct power_supply *) * (i + 1),
 				   GFP_KERNEL);

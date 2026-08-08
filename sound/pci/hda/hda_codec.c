@@ -1975,6 +1975,16 @@ _snd_hda_find_mixer_ctl(struct hda_codec *codec,
 	return snd_ctl_find_id(codec->bus->card, &id);
 }
 
+/* meta hook to call each driver's vmaster hook */
+static void vmaster_hook(void *private_data, int enabled)
+{
+	struct hda_vmaster_mute_hook *hook = private_data;
+
+	if (hook->mute_mode != HDA_VMUTE_FOLLOW_MASTER)
+		enabled = hook->mute_mode;
+	hook->hook(hook->codec, enabled);
+}
+
 /**
  * snd_hda_find_mixer_ctl - Find a mixer control element with the given name
  * @codec: HD-audio codec
@@ -2223,24 +2233,109 @@ int snd_hda_add_vmaster(struct hda_codec *codec, char *name,
 	if (err < 0)
 		return err;
 
-	for (s = slaves; *s; s++) {
-		struct snd_kcontrol *sctl;
-		int i = 0;
-		for (;;) {
-			sctl = _snd_hda_find_mixer_ctl(codec, *s, i);
-			if (!sctl) {
-				if (!i)
-					snd_printdd("Cannot find slave %s, "
-						    "skipped\n", *s);
-				break;
-			}
-			err = snd_ctl_add_slave(kctl, sctl);
-			if (err < 0)
-				return err;
-			i++;
-		}
-	}
+	err = map_slaves(codec, slaves, suffix,
+			 (map_slave_func_t)snd_ctl_add_slave, kctl);
+	if (err < 0)
+		return err;
+
+	/* init with master mute & zero volume */
+	put_kctl_with_value(kctl, 0);
+	if (init_slave_vol)
+		map_slaves(codec, slaves, suffix,
+			   tlv ? init_slave_0dB : init_slave_unmute, kctl);
+
+	if (ctl_ret)
+		*ctl_ret = kctl;
 	return 0;
+}
+EXPORT_SYMBOL_HDA(__snd_hda_add_vmaster);
+
+/*
+ * mute-LED control using vmaster
+ */
+static int vmaster_mute_mode_info(struct snd_kcontrol *kcontrol,
+				  struct snd_ctl_elem_info *uinfo)
+{
+	static const char * const texts[] = {
+		"Off", "On", "Follow Master"
+	};
+	unsigned int index;
+
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
+	uinfo->count = 1;
+	uinfo->value.enumerated.items = 3;
+	index = uinfo->value.enumerated.item;
+	if (index >= 3)
+		index = 2;
+	strcpy(uinfo->value.enumerated.name, texts[index]);
+	return 0;
+}
+
+static int vmaster_mute_mode_get(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct hda_vmaster_mute_hook *hook = snd_kcontrol_chip(kcontrol);
+	ucontrol->value.enumerated.item[0] = hook->mute_mode;
+	return 0;
+}
+
+static int vmaster_mute_mode_put(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct hda_vmaster_mute_hook *hook = snd_kcontrol_chip(kcontrol);
+	unsigned int old_mode = hook->mute_mode;
+
+	hook->mute_mode = ucontrol->value.enumerated.item[0];
+	if (hook->mute_mode > HDA_VMUTE_FOLLOW_MASTER)
+		hook->mute_mode = HDA_VMUTE_FOLLOW_MASTER;
+	if (old_mode == hook->mute_mode)
+		return 0;
+	snd_hda_sync_vmaster_hook(hook);
+	return 1;
+}
+
+static struct snd_kcontrol_new vmaster_mute_mode = {
+	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name = "Mute-LED Mode",
+	.info = vmaster_mute_mode_info,
+	.get = vmaster_mute_mode_get,
+	.put = vmaster_mute_mode_put,
+};
+
+/*
+ * Add a mute-LED hook with the given vmaster switch kctl
+ * "Mute-LED Mode" control is automatically created and associated with
+ * the given hook.
+ */
+int snd_hda_add_vmaster_hook(struct hda_codec *codec,
+			     struct hda_vmaster_mute_hook *hook,
+			     bool expose_enum_ctl)
+{
+	struct snd_kcontrol *kctl;
+
+	if (!hook->hook || !hook->sw_kctl)
+		return 0;
+	hook->codec = codec;
+	hook->mute_mode = HDA_VMUTE_FOLLOW_MASTER;
+	snd_ctl_add_vmaster_hook(hook->sw_kctl, vmaster_hook, hook);
+	if (!expose_enum_ctl)
+		return 0;
+	kctl = snd_ctl_new1(&vmaster_mute_mode, hook);
+	if (!kctl)
+		return -ENOMEM;
+	return snd_hda_ctl_add(codec, 0, kctl);
+}
+EXPORT_SYMBOL_HDA(snd_hda_add_vmaster_hook);
+
+/*
+ * Call the hook with the current value for synchronization
+ * Should be called in init callback
+ */
+void snd_hda_sync_vmaster_hook(struct hda_vmaster_mute_hook *hook)
+{
+	if (!hook->hook || !hook->codec)
+		return;
+	snd_ctl_sync_vmaster_hook(hook->sw_kctl);
 }
 EXPORT_SYMBOL_HDA(snd_hda_add_vmaster);
 

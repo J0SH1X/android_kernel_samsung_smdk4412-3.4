@@ -697,8 +697,20 @@ static int check_input_term(struct mixer_build *state, int id, struct usb_audio_
 			return 0;
 		}
 		case UAC1_PROCESSING_UNIT:
-		case UAC1_EXTENSION_UNIT: {
+		case UAC1_EXTENSION_UNIT:
+		/* UAC2_PROCESSING_UNIT_V2 */
+		/* UAC2_EFFECT_UNIT */
+		case UAC2_EXTENSION_UNIT_V2: {
 			struct uac_processing_unit_descriptor *d = p1;
+
+			if (state->mixer->protocol == UAC_VERSION_2 &&
+				hdr[2] == UAC2_EFFECT_UNIT) {
+				/* UAC2/UAC1 unit IDs overlap here in an
+				 * uncompatible way. Ignore this unit for now.
+				 */
+				return 0;
+			}
+
 			if (d->bNrInPins) {
 				id = d->baSourceID[0];
 				break; /* continue to parse */
@@ -763,6 +775,60 @@ static void usb_mixer_elem_free(struct snd_kcontrol *kctl)
 /*
  * interface to ALSA control for feature/mixer units
  */
+
+/* volume control quirks */
+static void volume_control_quirks(struct usb_mixer_elem_info *cval,
+				  struct snd_kcontrol *kctl)
+{
+	switch (cval->mixer->chip->usb_id) {
+	case USB_ID(0x0471, 0x0101):
+	case USB_ID(0x0471, 0x0104):
+	case USB_ID(0x0471, 0x0105):
+	case USB_ID(0x0672, 0x1041):
+	/* quirk for UDA1321/N101.
+	 * note that detection between firmware 2.1.1.7 (N101)
+	 * and later 2.1.1.21 is not very clear from datasheets.
+	 * I hope that the min value is -15360 for newer firmware --jk
+	 */
+		if (!strcmp(kctl->id.name, "PCM Playback Volume") &&
+		    cval->min == -15616) {
+			snd_printk(KERN_INFO
+				 "set volume quirk for UDA1321/N101 chip\n");
+			cval->max = -256;
+		}
+		break;
+
+	case USB_ID(0x046d, 0x09a4):
+		if (!strcmp(kctl->id.name, "Mic Capture Volume")) {
+			snd_printk(KERN_INFO
+				"set volume quirk for QuickCam E3500\n");
+			cval->min = 6080;
+			cval->max = 8768;
+			cval->res = 192;
+		}
+		break;
+
+	case USB_ID(0x046d, 0x0807): /* Logitech Webcam C500 */
+	case USB_ID(0x046d, 0x0808):
+	case USB_ID(0x046d, 0x0809):
+	case USB_ID(0x046d, 0x0819): /* Logitech Webcam C210 */
+	case USB_ID(0x046d, 0x081b): /* HD Webcam c310 */
+	case USB_ID(0x046d, 0x081d): /* HD Webcam c510 */
+	case USB_ID(0x046d, 0x0825): /* HD Webcam c270 */
+	case USB_ID(0x046d, 0x0991):
+	/* Most audio usb devices lie about volume resolution.
+	 * Most Logitech webcams have res = 384.
+	 * Proboly there is some logitech magic behind this number --fishor
+	 */
+		if (!strcmp(kctl->id.name, "Mic Capture Volume")) {
+			snd_printk(KERN_INFO
+				"set resolution quirk: cval->res = 384\n");
+			cval->res = 384;
+		}
+		break;
+
+	}
+}
 
 /*
  * retrieve the minimum and maximum values for the specified control
@@ -1108,50 +1174,7 @@ static void build_feature_ctl(struct mixer_build *state, void *raw_desc,
 		break;
 	}
 
-	/* volume control quirks */
-	switch (state->chip->usb_id) {
-	case USB_ID(0x0471, 0x0101):
-	case USB_ID(0x0471, 0x0104):
-	case USB_ID(0x0471, 0x0105):
-	case USB_ID(0x0672, 0x1041):
-	/* quirk for UDA1321/N101.
-	 * note that detection between firmware 2.1.1.7 (N101)
-	 * and later 2.1.1.21 is not very clear from datasheets.
-	 * I hope that the min value is -15360 for newer firmware --jk
-	 */
-		if (!strcmp(kctl->id.name, "PCM Playback Volume") &&
-		    cval->min == -15616) {
-			snd_printk(KERN_INFO
-				 "set volume quirk for UDA1321/N101 chip\n");
-			cval->max = -256;
-		}
-		break;
-
-	case USB_ID(0x046d, 0x09a4):
-		if (!strcmp(kctl->id.name, "Mic Capture Volume")) {
-			snd_printk(KERN_INFO
-				"set volume quirk for QuickCam E3500\n");
-			cval->min = 6080;
-			cval->max = 8768;
-			cval->res = 192;
-		}
-		break;
-
-	case USB_ID(0x046d, 0x0808):
-	case USB_ID(0x046d, 0x0809):
-	case USB_ID(0x046d, 0x0991):
-	/* Most audio usb devices lie about volume resolution.
-	 * Most Logitech webcams have res = 384.
-	 * Proboly there is some logitech magic behind this number --fishor
-	 */
-		if (!strcmp(kctl->id.name, "Mic Capture Volume")) {
-			snd_printk(KERN_INFO
-				"set resolution quirk: cval->res = 384\n");
-			cval->res = 384;
-		}
-		break;
-
-	}
+	snd_usb_mixer_fu_apply_quirk(state->mixer, cval, unitid, kctl);
 
 	range = (cval->max - cval->min) / cval->res;
 	/* Are there devices with volume range more than 255? I use a bit more
@@ -1899,6 +1922,8 @@ static int parse_audio_unit(struct mixer_build *state, int unitid)
 			return parse_audio_extension_unit(state, unitid, p1);
 		else /* UAC_VERSION_2 */
 			return parse_audio_processing_unit(state, unitid, p1);
+	case UAC2_EXTENSION_UNIT_V2:
+		return parse_audio_extension_unit(state, unitid, p1);
 	default:
 		snd_printk(KERN_ERR "usbaudio: unit %u: unexpected type 0x%02x\n", unitid, p1[2]);
 		return -EINVAL;

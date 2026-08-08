@@ -6,7 +6,7 @@
  *
  * Copyright (C) 1998,2001-2005 Pavel Machek <pavel@ucw.cz>
  * Copyright (C) 2006 Rafael J. Wysocki <rjw@sisk.pl>
- * Copyright (C) 2010 Bojan Smojver <bojan@rexursive.com>
+ * Copyright (C) 2010-2012 Bojan Smojver <bojan@rexursive.com>
  *
  * This file is released under the GPLv2.
  *
@@ -250,13 +250,24 @@ static int write_page(void *buf, sector_t offset, struct bio **bio_chain)
 		return -ENOSPC;
 
 	if (bio_chain) {
-		src = (void *)__get_free_page(__GFP_WAIT | __GFP_HIGH);
+		src = (void *)__get_free_page(__GFP_WAIT | __GFP_NOWARN |
+		                              __GFP_NORETRY);
 		if (src) {
 			copy_page(src, buf);
 		} else {
-			WARN_ON_ONCE(1);
-			bio_chain = NULL;	/* Go synchronous */
-			src = buf;
+			ret = hib_wait_on_bio_chain(bio_chain); /* Free pages */
+			if (ret)
+				return ret;
+			src = (void *)__get_free_page(__GFP_WAIT |
+			                              __GFP_NOWARN |
+			                              __GFP_NORETRY);
+			if (src) {
+				copy_page(src, buf);
+			} else {
+				WARN_ON_ONCE(1);
+				bio_chain = NULL;	/* Go synchronous */
+				src = buf;
+			}
 		}
 	} else {
 		src = buf;
@@ -329,6 +340,17 @@ static int swap_write_page(struct swap_map_handle *handle, void *buf,
 		clear_page(handle->cur);
 		handle->cur_swap = offset;
 		handle->k = 0;
+
+		if (bio_chain && low_free_pages() <= handle->reqd_free_pages) {
+			error = hib_wait_on_bio_chain(bio_chain);
+			if (error)
+				goto out;
+			/*
+			 * Recalculate the number of required free pages, to
+			 * make sure we never take more than half.
+			 */
+			handle->reqd_free_pages = reqd_free_pages();
+		}
 	}
  out:
 	return error;
@@ -372,14 +394,13 @@ static int swap_writer_finish(struct swap_map_handle *handle,
 			             LZO_HEADER, PAGE_SIZE)
 #define LZO_CMP_SIZE	(LZO_CMP_PAGES * PAGE_SIZE)
 
-/*
- * lzo experimental compression ratio.
- * When compression is used for hibernation, swap size is not required for worst
- * case. So we use an experimental compression ratio. If the swap size is not
- * enough, then alloc_swapdev_block() return fails and hibernation codes handle
- * the error well.
- */
-#define LZO_RATIO(x)	((x) / 2)
+/* Maximum number of threads for compression/decompression. */
+#define LZO_THREADS	3
+
+/* Minimum/maximum number of pages for read buffering. */
+#define LZO_MIN_RD_PAGES	1024
+#define LZO_MAX_RD_PAGES	8192
+
 
 /**
  *	save_image - save the suspend image data
@@ -462,12 +483,17 @@ static int save_image_lzo(struct swap_map_handle *handle,
 		return -ENOMEM;
 	}
 
-	unc = vmalloc(LZO_UNC_SIZE);
-	if (!unc) {
-		printk(KERN_ERR "PM: Failed to allocate LZO uncompressed\n");
-		vfree(wrk);
-		free_page((unsigned long)page);
-		return -ENOMEM;
+	/*
+	 * Start the CRC32 thread.
+	 */
+	init_waitqueue_head(&crc->go);
+	init_waitqueue_head(&crc->done);
+
+	handle->crc32 = 0;
+	crc->crc32 = &handle->crc32;
+	for (thr = 0; thr < nr_threads; thr++) {
+		crc->unc[thr] = data[thr].unc;
+		crc->unc_len[thr] = &data[thr].unc_len;
 	}
 
 	cmp = vmalloc(LZO_CMP_SIZE);
@@ -478,6 +504,12 @@ static int save_image_lzo(struct swap_map_handle *handle,
 		free_page((unsigned long)page);
 		return -ENOMEM;
 	}
+
+	/*
+	 * Adjust the number of required free pages after all allocations have
+	 * been done. We don't want to run out of pages when writing.
+	 */
+	handle->reqd_free_pages = reqd_free_pages();
 
 	printk(KERN_INFO
 		"PM: Compressing and saving image data (%u pages) ...     ",
@@ -774,11 +806,103 @@ static int load_image_lzo(struct swap_map_handle *handle,
 	struct timeval start;
 	struct timeval stop;
 	unsigned nr_pages;
-	size_t i, off, unc_len, cmp_len;
-	unsigned char *unc, *cmp, *page[LZO_CMP_PAGES];
+	size_t off;
+	unsigned i, thr, run_threads, nr_threads;
+	unsigned ring = 0, pg = 0, ring_size = 0,
+	         have = 0, want, need, asked = 0;
+	unsigned long read_pages = 0;
+	unsigned char **page = NULL;
+	struct dec_data *data = NULL;
+	struct crc_data *crc = NULL;
 
-	for (i = 0; i < LZO_CMP_PAGES; i++) {
-		page[i] = (void *)__get_free_page(__GFP_WAIT | __GFP_HIGH);
+	/*
+	 * We'll limit the number of threads for decompression to limit memory
+	 * footprint.
+	 */
+	nr_threads = num_online_cpus() - 1;
+	nr_threads = clamp_val(nr_threads, 1, LZO_THREADS);
+
+	page = vmalloc(sizeof(*page) * LZO_MAX_RD_PAGES);
+	if (!page) {
+		printk(KERN_ERR "PM: Failed to allocate LZO page\n");
+		ret = -ENOMEM;
+		goto out_clean;
+	}
+
+	data = vmalloc(sizeof(*data) * nr_threads);
+	if (!data) {
+		printk(KERN_ERR "PM: Failed to allocate LZO data\n");
+		ret = -ENOMEM;
+		goto out_clean;
+	}
+	for (thr = 0; thr < nr_threads; thr++)
+		memset(&data[thr], 0, offsetof(struct dec_data, go));
+
+	crc = kmalloc(sizeof(*crc), GFP_KERNEL);
+	if (!crc) {
+		printk(KERN_ERR "PM: Failed to allocate crc\n");
+		ret = -ENOMEM;
+		goto out_clean;
+	}
+	memset(crc, 0, offsetof(struct crc_data, go));
+
+	/*
+	 * Start the decompression threads.
+	 */
+	for (thr = 0; thr < nr_threads; thr++) {
+		init_waitqueue_head(&data[thr].go);
+		init_waitqueue_head(&data[thr].done);
+
+		data[thr].thr = kthread_run(lzo_decompress_threadfn,
+		                            &data[thr],
+		                            "image_decompress/%u", thr);
+		if (IS_ERR(data[thr].thr)) {
+			data[thr].thr = NULL;
+			printk(KERN_ERR
+			       "PM: Cannot start decompression threads\n");
+			ret = -ENOMEM;
+			goto out_clean;
+		}
+	}
+
+	/*
+	 * Start the CRC32 thread.
+	 */
+	init_waitqueue_head(&crc->go);
+	init_waitqueue_head(&crc->done);
+
+	handle->crc32 = 0;
+	crc->crc32 = &handle->crc32;
+	for (thr = 0; thr < nr_threads; thr++) {
+		crc->unc[thr] = data[thr].unc;
+		crc->unc_len[thr] = &data[thr].unc_len;
+	}
+
+	crc->thr = kthread_run(crc32_threadfn, crc, "image_crc32");
+	if (IS_ERR(crc->thr)) {
+		crc->thr = NULL;
+		printk(KERN_ERR "PM: Cannot start CRC32 thread\n");
+		ret = -ENOMEM;
+		goto out_clean;
+	}
+
+	/*
+	 * Set the number of pages for read buffering.
+	 * This is complete guesswork, because we'll only know the real
+	 * picture once prepare_image() is called, which is much later on
+	 * during the image load phase. We'll assume the worst case and
+	 * say that none of the image pages are from high memory.
+	 */
+	if (low_free_pages() > snapshot_get_image_size())
+		read_pages = (low_free_pages() - snapshot_get_image_size()) / 2;
+	read_pages = clamp_val(read_pages, LZO_MIN_RD_PAGES, LZO_MAX_RD_PAGES);
+
+	for (i = 0; i < read_pages; i++) {
+		page[i] = (void *)__get_free_page(i < LZO_CMP_PAGES ?
+		                                  __GFP_WAIT | __GFP_HIGH :
+		                                  __GFP_WAIT | __GFP_NOWARN |
+		                                  __GFP_NORETRY);
+
 		if (!page[i]) {
 			printk(KERN_ERR "PM: Failed to allocate LZO page\n");
 

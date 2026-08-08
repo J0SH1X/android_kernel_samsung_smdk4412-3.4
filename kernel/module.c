@@ -935,11 +935,15 @@ void symbol_put_addr(void *addr)
 	if (core_kernel_text(a))
 		return;
 
-	/* module_text_address is safe here: we're supposed to have reference
-	 * to module from symbol_get, so it can't go away. */
+	/*
+	 * Even though we hold a reference on the module; we still need to
+	 * disable preemption in order to safely traverse the data structure.
+	 */
+	preempt_disable();
 	modaddr = __module_text_address(a);
 	BUG_ON(!modaddr);
 	module_put(modaddr);
+	preempt_enable();
 }
 EXPORT_SYMBOL_GPL(symbol_put_addr);
 
@@ -2991,6 +2995,143 @@ static int post_relocation(struct module *mod, const struct load_info *info)
 
 	/* Arch-specific module finalizing. */
 	return module_finalize(info->hdr, info->sechdrs, mod);
+}
+
+/* Allocate and load the module: note that size of section 0 is always
+   zero, and we rely on this for optional sections. */
+static struct module *load_module(void __user *umod,
+				  unsigned long len,
+				  const char __user *uargs)
+{
+	struct load_info info = { NULL, };
+	struct module *mod;
+	long err;
+
+	pr_debug("load_module: umod=%p, len=%lu, uargs=%p\n",
+	       umod, len, uargs);
+
+	/* Copy in the blobs from userspace, check they are vaguely sane. */
+	err = copy_and_check(&info, umod, len, uargs);
+	if (err)
+		return ERR_PTR(err);
+
+	/* Figure out module layout, and allocate all the memory. */
+	mod = layout_and_allocate(&info);
+	if (IS_ERR(mod)) {
+		err = PTR_ERR(mod);
+		goto free_copy;
+	}
+
+	/* Now module is in final location, initialize linked lists, etc. */
+	err = module_unload_init(mod);
+	if (err)
+		goto free_module;
+
+	/* Now we've got everything in the final locations, we can
+	 * find optional sections. */
+	find_module_sections(mod, &info);
+
+	err = check_module_license_and_versions(mod);
+	if (err)
+		goto free_unload;
+
+	/* Set up MODINFO_ATTR fields */
+	setup_modinfo(mod, &info);
+
+	/* Fix up syms, so that st_value is a pointer to location. */
+	err = simplify_symbols(mod, &info);
+	if (err < 0)
+		goto free_modinfo;
+
+	err = apply_relocations(mod, &info);
+	if (err < 0)
+		goto free_modinfo;
+
+	err = post_relocation(mod, &info);
+	if (err < 0)
+		goto free_modinfo;
+
+	flush_module_icache(mod);
+
+	/* Now copy in args */
+	mod->args = strndup_user(uargs, ~0UL >> 1);
+	if (IS_ERR(mod->args)) {
+		err = PTR_ERR(mod->args);
+		goto free_arch_cleanup;
+	}
+
+	/* Mark state as coming so strong_try_module_get() ignores us. */
+	mod->state = MODULE_STATE_COMING;
+
+	/* Now sew it into the lists so we can get lockdep and oops
+	 * info during argument parsing.  No one should access us, since
+	 * strong_try_module_get() will fail.
+	 * lockdep/oops can run asynchronous, so use the RCU list insertion
+	 * function to insert in a way safe to concurrent readers.
+	 * The mutex protects against concurrent writers.
+	 */
+	mutex_lock(&module_mutex);
+	if (find_module(mod->name)) {
+		err = -EEXIST;
+		goto unlock;
+	}
+
+	/* This has to be done once we're sure module name is unique. */
+	dynamic_debug_setup(info.debug, info.num_debug);
+
+	/* Ftrace init must be called in the MODULE_STATE_UNFORMED state */
+	ftrace_module_init(mod);
+
+	/* Find duplicate symbols */
+	err = verify_export_symbols(mod);
+	if (err < 0)
+		goto ddebug;
+
+	module_bug_finalize(info.hdr, info.sechdrs, mod);
+	list_add_rcu(&mod->list, &modules);
+	mutex_unlock(&module_mutex);
+
+	/* Module is ready to execute: parsing args may do that. */
+	err = parse_args(mod->name, mod->args, mod->kp, mod->num_kp,
+			 -32768, 32767, NULL);
+	if (err < 0)
+		goto unlink;
+
+	/* Link in to syfs. */
+	err = mod_sysfs_setup(mod, &info, mod->kp, mod->num_kp);
+	if (err < 0)
+		goto unlink;
+
+	/* Get rid of temporary copy. */
+	free_copy(&info);
+
+	/* Done! */
+	trace_module_load(mod);
+	return mod;
+
+ unlink:
+	mutex_lock(&module_mutex);
+	/* Unlink carefully: kallsyms could be walking list. */
+	list_del_rcu(&mod->list);
+	module_bug_cleanup(mod);
+
+ ddebug:
+	dynamic_debug_remove(info.debug);
+ unlock:
+	mutex_unlock(&module_mutex);
+	synchronize_sched();
+	kfree(mod->args);
+ free_arch_cleanup:
+	module_arch_cleanup(mod);
+ free_modinfo:
+	free_modinfo(mod);
+ free_unload:
+	module_unload_free(mod);
+ free_module:
+	module_deallocate(mod, &info);
+ free_copy:
+	free_copy(&info);
+	return ERR_PTR(err);
 }
 
 /* Call module constructors. */
