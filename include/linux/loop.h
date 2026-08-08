@@ -61,6 +61,7 @@ struct loop_device {
 	struct mutex		lo_ctl_mutex;
 	struct task_struct	*lo_thread;
 	wait_queue_head_t	lo_event;
+	bool			sysfs_inited;
 
 	struct request_queue	*lo_queue;
 	struct gendisk		*lo_disk;
@@ -159,6 +160,7 @@ int loop_unregister_transfer(int number);
 #define LOOP_GET_STATUS64	0x4C05
 #define LOOP_CHANGE_FD		0x4C06
 #define LOOP_SET_CAPACITY	0x4C07
+#define LOOP_SET_BLOCK_SIZE	0x4C09
 
 /* /dev/loop-control interface */
 #define LOOP_CTL_ADD		0x4C80

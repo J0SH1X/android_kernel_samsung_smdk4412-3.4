@@ -52,7 +52,7 @@ static int palm_os_4_probe(struct usb_serial *serial,
 					const struct usb_device_id *id);
 
 /* Parameters that may be passed into the module. */
-static bool debug;
+static int debug;
 static __u16 vendor;
 static __u16 product;
 
@@ -600,6 +600,7 @@ static int treo_attach(struct usb_serial *serial)
 		dest->bulk_in_endpointAddress = src->bulk_in_endpointAddress;\
 		dest->bulk_in_buffer = src->bulk_in_buffer;		\
 		dest->interrupt_in_urb = src->interrupt_in_urb;		\
+		dest->interrupt_in_urb->context = dest;			\
 		dest->interrupt_in_endpointAddress = \
 					src->interrupt_in_endpointAddress;\
 		dest->interrupt_in_buffer = src->interrupt_in_buffer;	\
@@ -633,8 +634,10 @@ static int clie_5_attach(struct usb_serial *serial)
 	 */
 
 	/* some sanity check */
-	if (serial->num_ports < 2)
-		return -1;
+	if (serial->num_bulk_out < 2) {
+		dev_err(&serial->interface->dev, "missing bulk out endpoints\n");
+		return -ENODEV;
+	}
 
 	/* port 0 now uses the modified endpoint Address */
 	port = serial->port[0];

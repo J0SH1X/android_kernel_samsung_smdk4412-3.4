@@ -19,17 +19,15 @@ ldflags()
 # Where is ncurses.h?
 ccflags()
 {
-	if [ -f /usr/include/ncurses/ncurses.h ]; then
-		echo '-I/usr/include/ncurses -DCURSES_LOC="<ncurses.h>"'
-	elif [ -f /usr/include/ncurses/curses.h ]; then
-		echo '-I/usr/include/ncurses -DCURSES_LOC="<ncurses/curses.h>"'
-	elif [ -f /usr/include/ncursesw/curses.h ]; then
-		echo '-I/usr/include/ncursesw -DCURSES_LOC="<ncursesw/curses.h>"'
-	elif [ -f /usr/include/ncurses.h ]; then
-		echo '-DCURSES_LOC="<ncurses.h>"'
-	else
-		echo '-DCURSES_LOC="<curses.h>"'
-	fi
+if [ -f /usr/include/curses.h ]; then
+    echo '-DCURSES_LOC="<curses.h>"'
+elif [ -f /usr/include/ncurses.h ]; then
+    echo '-DCURSES_LOC="<ncurses.h>"'
+elif [ -f /usr/include/ncursesw/curses.h ]; then
+    echo '-DCURSES_LOC="<ncursesw/curses.h>"'
+else
+    echo '-DCURSES_LOC="<curses.h>"'
+fi
 }
 
 # Temp file, try to clean up after us
@@ -38,9 +36,9 @@ trap "rm -f $tmp" 0 1 2 3 15
 
 # Check if we can link to ncurses
 check() {
-        $cc -x c - -o $tmp 2>/dev/null <<'EOF'
+"$@" -x c - -o "$tmp" 2>/dev/null <<'EOF'
 #include CURSES_LOC
-main() {}
+int main(void) { return 0; }
 EOF
 	if [ $? != 0 ]; then
 	    echo " *** Unable to find the ncurses libraries or the"       1>&2
@@ -66,8 +64,7 @@ cc=""
 case "$1" in
 	"-check")
 		shift
-		cc="$@"
-		check
+		check "$@"
 		;;
 	"-ccflags")
 		ccflags

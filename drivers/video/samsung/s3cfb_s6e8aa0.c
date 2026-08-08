@@ -136,9 +136,9 @@ struct lcd_info {
 	struct dsim_global		*dsim;
 };
 
+#ifdef CONFIG_AID_DIMMING
 struct lcd_info *lcd_ptr;
 
-#ifdef CONFIG_AID_DIMMING
 static const unsigned int candela_table[GAMMA_MAX] = {
 	 20,  30,  40,  50,  60,  70,  80,  90, 100,
 	102, 104, 106, 108,
@@ -1392,6 +1392,7 @@ static ssize_t auto_brightness_store(struct device *dev,
 }
 
 static DEVICE_ATTR(auto_brightness, 0644, auto_brightness_show, auto_brightness_store);
+#ifdef CONFIG_AID_DIMMING
 static ssize_t brightness_config_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -1539,6 +1540,7 @@ static ssize_t brightness_config_store(struct device *dev,
 	update_brightness(lcd_ptr, 1);
 	return size;
 }
+#endif /* CONFIG_AID_DIMMING */
 
 #ifdef CONFIG_FB
 struct lcd_info *g_lcd;
@@ -1690,7 +1692,9 @@ static int s6e8ax0_probe(struct device *dev)
 		ret = -ENOMEM;
 		goto err_alloc;
 	}
+#ifdef CONFIG_AID_DIMMING
 	lcd_ptr = lcd;
+#endif
 
 	g_lcd = lcd;
 
@@ -1862,7 +1866,7 @@ static struct mipi_lcd_driver s6e8ax0_mipi_driver = {
 
 static int s6e8ax0_init(void)
 {
-
+#ifdef CONFIG_AID_DIMMING
 	aid_command_20[0] = aid_20nit_F8_18th;
 	aid_command_20[1] = aid_100nit_20nit_F8_1st;
 
@@ -1935,6 +1939,7 @@ static int s6e8ax0_init(void)
 	aid_candela_table[30] = 240;
 	aid_candela_table[31] = 250;
 	aid_candela_table[32] = MAX_GAMMA-1;
+#endif /* CONFIG_AID_DIMMING */
 
 	return s5p_dsim_register_lcd_driver(&s6e8ax0_mipi_driver);
 }

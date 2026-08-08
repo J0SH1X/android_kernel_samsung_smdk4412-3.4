@@ -20,7 +20,10 @@
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
-#include <linux/earlysuspend.h>
+#ifdef CONFIG_FB
+#include <linux/notifier.h>
+#include <linux/fb.h>
+#endif
 #include <linux/slab.h>
 #include <linux/gpio.h>
 #include <linux/i2c/mxt540e.h>
@@ -127,7 +130,8 @@ static bool rid_map_alloc;
 struct mxt540e_data {
 	struct i2c_client *client;
 	struct input_dev *input_dev;
-	struct early_suspend early_suspend;
+	struct notifier_block fb_notif;
+	bool fb_suspended;
 	struct median_error_t *median_error;
 	struct object_t *objects;
 	struct delayed_work config_dwork;
@@ -1368,37 +1372,39 @@ static int mxt540e_internal_resume(struct mxt540e_data *data)
 	return 0;
 }
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
+#ifdef CONFIG_FB
 #define mxt540e_suspend	NULL
 #define mxt540e_resume	NULL
 
-static void mxt540e_early_suspend(struct early_suspend *h)
+static void mxt540e_fb_suspend(struct mxt540e_data *data)
 {
-	struct mxt540e_data *data = container_of(h, struct mxt540e_data,
-						early_suspend);
+	if (data->fb_suspended)
+		return;
+
 	if (mxt540e_enabled) {
-		printk(KERN_DEBUG "[TSP] %s\n", __func__);
 		mxt540e_enabled = 0;
 		touch_is_pressed = 0;
 
 		disable_irq(data->client->irq);
 		mxt540e_internal_suspend(data);
+
+		data->fb_suspended = true;
 	} else {
-		printk(KERN_DEBUG "[TSP] %s, but already off\n", __func__);
+		//
 	}
 }
 
-static void mxt540e_late_resume(struct early_suspend *h)
+static void mxt540e_fb_resume(struct mxt540e_data *data)
 {
-	struct mxt540e_data *data = container_of(h, struct mxt540e_data,
-						early_suspend);
+	if (!data->fb_suspended)
+		return;
+
 	bool ta_status = 0;
 	u8 id[ID_BLOCK_SIZE];
 	int ret = 0;
 	int retry = 3;
 
 	if (mxt540e_enabled == 0) {
-		printk(KERN_DEBUG "[TSP] %s\n", __func__);
 		mxt540e_internal_resume(data);
 
 		mxt540e_enabled = 1;
@@ -1433,9 +1439,39 @@ static void mxt540e_late_resume(struct early_suspend *h)
 		schedule_delayed_work(&data->config_dwork, HZ * 5);
 		config_dwork_flag = 3;
 		enable_irq(data->client->irq);
+
+		data->fb_suspended = false;
 	} else {
-		printk(KERN_DEBUG "[TSP] %s, but already on\n", __func__);
+		//
 	}
+}
+
+static int fb_notifier_callback(struct notifier_block *self,
+				unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+	int *blank;
+	struct mxt540e_data *mxt = container_of(self, struct mxt540e_data, fb_notif);
+
+	if (evdata && evdata->data && mxt) {
+		if (event == FB_EVENT_BLANK) {
+			blank = evdata->data;
+			switch (*blank) {
+				case FB_BLANK_UNBLANK:
+				case FB_BLANK_NORMAL:
+				case FB_BLANK_VSYNC_SUSPEND:
+				case FB_BLANK_HSYNC_SUSPEND:
+					mxt540e_fb_resume(mxt);
+					break;
+				default:
+				case FB_BLANK_POWERDOWN:
+					mxt540e_fb_suspend(mxt);
+					break;
+			}
+		}
+	}
+
+	return 0;
 }
 #else
 static int mxt540e_suspend(struct device *dev)
@@ -2858,11 +2894,10 @@ static int __devinit mxt540e_probe(struct i2c_client *client,
 		printk(KERN_ERR "Failed to create device file(%s)!\n",
 			dev_attr_set_module_on.attr.name);
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	data->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
-	data->early_suspend.suspend = mxt540e_early_suspend;
-	data->early_suspend.resume = mxt540e_late_resume;
-	register_early_suspend(&data->early_suspend);
+#ifdef CONFIG_FB
+	data->fb_suspended = false;
+	data->fb_notif.notifier_call = fb_notifier_callback;
+	fb_register_client(&data->fb_notif);
 #endif
 	return 0;
 
@@ -2886,8 +2921,8 @@ static int __devexit mxt540e_remove(struct i2c_client *client)
 {
 	struct mxt540e_data *data = i2c_get_clientdata(client);
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	unregister_early_suspend(&data->early_suspend);
+#ifdef CONFIG_FB
+	fb_unregister_client(&data->fb_notif);
 #endif
 	free_irq(client->irq, data);
 	kfree(data->objects);

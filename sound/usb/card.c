@@ -529,8 +529,14 @@ static void *snd_usb_audio_probe(struct usb_device *dev,
 	return chip;
 
  __error:
-	if (chip && !chip->num_interfaces)
-		snd_card_free(chip->card);
+	if (chip) {
+		/* chip->probing is inside the chip->card object,
+		 * reset before memory is possibly returned.
+		 */
+		chip->probing = 0;
+		if (!chip->num_interfaces)
+			snd_card_free(chip->card);
+	}
 	mutex_unlock(&register_mutex);
  __err_val:
 	return NULL;

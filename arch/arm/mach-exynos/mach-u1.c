@@ -3142,7 +3142,7 @@ static struct regulator_init_data buck2_init_data = {
 static struct regulator_init_data buck3_init_data = {
 	.constraints	= {
 		.name		= "G3D_1.1V",
-		.min_uV		= 800000,
+		.min_uV		= 900000,
 		.max_uV		= 1200000,
 		.always_on	= 0,
 		.boot_on	= 0,
@@ -6121,8 +6121,8 @@ static int p6_wacom_init_hw(void);
 static int p6_wacom_exit_hw(void);
 static int p6_wacom_suspend_hw(void);
 static int p6_wacom_resume_hw(void);
-static int p6_wacom_early_suspend_hw(void);
-static int p6_wacom_late_resume_hw(void);
+static int p6_wacom_fb_suspend_hw(void);
+static int p6_wacom_fb_resume_hw(void);
 static int p6_wacom_reset_hw(void);
 static void p6_wacom_register_callbacks(struct wacom_g5_callbacks *cb);
 
@@ -6141,8 +6141,8 @@ static struct wacom_g5_platform_data p6_wacom_platform_data = {
 /*	.exit_platform_hw =,	*/
 	.suspend_platform_hw = p6_wacom_suspend_hw,
 	.resume_platform_hw = p6_wacom_resume_hw,
-	.early_suspend_platform_hw = p6_wacom_early_suspend_hw,
-	.late_resume_platform_hw = p6_wacom_late_resume_hw,
+	.fb_suspend_platform_hw = p6_wacom_fb_suspend_hw,
+	.fb_resume_platform_hw = p6_wacom_fb_resume_hw,
 	.reset_platform_hw = p6_wacom_reset_hw,
 	.register_cb = p6_wacom_register_callbacks,
 };
@@ -6152,22 +6152,22 @@ static struct wacom_g5_platform_data p6_wacom_platform_data = {
 #ifdef CONFIG_EPEN_WACOM_G5SP
 static int p6_wacom_suspend_hw(void)
 {
-	return p6_wacom_early_suspend_hw();
+	return p6_wacom_fb_suspend_hw();
 }
 
 static int p6_wacom_resume_hw(void)
 {
-	return p6_wacom_late_resume_hw();
+	return p6_wacom_fb_resume_hw();
 }
 
-static int p6_wacom_early_suspend_hw(void)
+static int p6_wacom_fb_suspend_hw(void)
 {
 	gpio_direction_input(GPIO_PEN_PDCT);
 	gpio_set_value(GPIO_PEN_RESET, 0);
 	return 0;
 }
 
-static int p6_wacom_late_resume_hw(void)
+static int p6_wacom_fb_resume_hw(void)
 {
 	gpio_direction_output(GPIO_PEN_PDCT, 1);
 	gpio_set_value(GPIO_PEN_RESET, 1);
@@ -6176,9 +6176,9 @@ static int p6_wacom_late_resume_hw(void)
 
 static int p6_wacom_reset_hw(void)
 {
-	p6_wacom_early_suspend_hw();
+	p6_wacom_fb_suspend_hw();
 	msleep(200);
-	p6_wacom_late_resume_hw();
+	p6_wacom_fb_resume_hw();
 
 	return 0;
 }
@@ -7501,19 +7501,33 @@ static struct platform_device *smdkc210_devices[] __initdata = {
 #ifdef CONFIG_EXYNOS4_SETUP_THERMAL
 /* below temperature base on the celcius degree */
 struct s5p_platform_tmu u1_tmu_data __initdata = {
-	.ts = { //use 4x12 values -gm
-		.stop_1st_throttle  = 78,
-		.start_1st_throttle = 80,
+	.ts = {
+#ifdef CONFIG_EXYNOS4210_1200MHZ_SUPPORT
+		.stop_1st_throttle  = 61,
+		.start_1st_throttle = 64,
 		.stop_2nd_throttle  = 87,
 		.start_2nd_throttle = 103,
 		.start_tripping     = 110,
 		.start_emergency    = 120,
+#else
+		.stop_1st_throttle  = 59,
+		.start_1st_throttle = 64,
+		.stop_2nd_throttle  = 87,
+		.start_2nd_throttle = 103,
+		.start_tripping     = 110,
+		.start_emergency    = 120,
+#endif
 		.stop_mem_throttle  = 80,
 		.start_mem_throttle = 85,
 	},
 	.cpufreq = {
+#ifdef CONFIG_EXYNOS4210_1200MHZ_SUPPORT
 		.limit_1st_throttle  = 800000, /* 800MHz in KHz order */
 		.limit_2nd_throttle  = 200000, /* 200MHz in KHz order */
+#else
+		.limit_1st_throttle  = 1000000, /* 1000MHz in KHz order */
+		.limit_2nd_throttle  =  500000, /*  500MHz in KHz order */
+#endif
 	},
 };
 #endif
@@ -8164,7 +8178,7 @@ static void __init exynos_init_reserve(void)
 
 MACHINE_START(SMDKC210, MODEL_NAME)
 	/* Maintainer: Kukjin Kim <kgene.kim@samsung.com> */
-        .atag_offset	= S5P_PA_SDRAM + 0x100,
+	.atag_offset	= 0x100,
 	.handle_irq	= gic_handle_irq,
 	.init_irq	= exynos4_init_irq,
 	.map_io		= smdkc210_map_io,

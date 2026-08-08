@@ -405,9 +405,13 @@
 #define __NR_process_vm_readv		(__NR_SYSCALL_BASE+376)
 #define __NR_process_vm_writev		(__NR_SYSCALL_BASE+377)
 #define __NR_kcmp			(__NR_SYSCALL_BASE+378)
+#define __NR_renameat2			(__NR_SYSCALL_BASE+382)
 #define __NR_seccomp			(__NR_SYSCALL_BASE+383)
 #define __NR_getrandom			(__NR_SYSCALL_BASE+384)
 #define __NR_memfd_create		(__NR_SYSCALL_BASE+385)
+#define __NR_bpf                        (__NR_SYSCALL_BASE+386)
+#define __NR_close_range				(__NR_SYSCALL_BASE+436)
+#define __NR_epoll_pwait2				(__NR_SYSCALL_BASE+441)
 
 /*
  * The following SWIs are ARM private.
@@ -418,6 +422,14 @@
 #define __ARM_NR_usr26			(__ARM_NR_BASE+3)
 #define __ARM_NR_usr32			(__ARM_NR_BASE+4)
 #define __ARM_NR_set_tls		(__ARM_NR_BASE+5)
+
+/*
+ * This may need to be greater than __NR_last_syscall+1 in order to
+ * account for the padding in the syscall table
+ */
+#ifdef __KERNEL__
+#define __NR_syscalls  (442)
+#endif
 
 /*
  * *NOTE*: This is a ghost syscall private to the kernel.  Only the

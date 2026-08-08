@@ -50,8 +50,8 @@ struct inet6_ifaddr {
 
 	int			state;
 
+	__u32			flags;
 	__u8			probes;
-	__u8			flags;
 
 	__u16			scope;
 
@@ -72,6 +72,7 @@ struct inet6_ifaddr {
 	int			regen_count;
 #endif
 	struct rcu_head		rcu;
+	struct in6_addr		peer_addr;
 };
 
 struct ip6_sf_socklist {
@@ -120,7 +121,7 @@ struct ifmcaddr6 {
 	unsigned char		mca_crcount;
 	unsigned long		mca_sfcount[2];
 	struct timer_list	mca_timer;
-	unsigned		mca_flags;
+	unsigned int		mca_flags;
 	int			mca_users;
 	atomic_t		mca_refcnt;
 	spinlock_t		mca_lock;

@@ -217,6 +217,7 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	skb->end = skb->tail + size;
 #ifdef NET_SKBUFF_DATA_USES_OFFSET
 	skb->mac_header = ~0U;
+	skb->transport_header = ~0U;
 #endif
 
 	/* make sure we initialize shinfo sequentially */
@@ -282,6 +283,7 @@ struct sk_buff *build_skb(void *data)
 	skb->end = skb->tail + size;
 #ifdef NET_SKBUFF_DATA_USES_OFFSET
 	skb->mac_header = ~0U;
+	skb->transport_header = ~0U;
 #endif
 
 	/* make sure we initialize shinfo sequentially */
@@ -3170,7 +3172,7 @@ int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
 	int len = skb->len;
 
 	if (atomic_read(&sk->sk_rmem_alloc) + skb->truesize >=
-	    (unsigned)sk->sk_rcvbuf)
+	    (unsigned int)sk->sk_rcvbuf)
 		return -ENOMEM;
 
 	skb_orphan(skb);
@@ -3309,3 +3311,12 @@ unsigned int skb_gso_transport_seglen(const struct sk_buff *skb)
 	return shinfo->gso_size;
 }
 EXPORT_SYMBOL_GPL(skb_gso_transport_seglen);
+
+int skb_ensure_writable(struct sk_buff *skb, int write_len)
+{
+	if (!skb_cloned(skb) || skb_clone_writable(skb, write_len))
+		return 0;
+
+	return pskb_expand_head(skb, 0, 0, GFP_ATOMIC);
+}
+EXPORT_SYMBOL(skb_ensure_writable);

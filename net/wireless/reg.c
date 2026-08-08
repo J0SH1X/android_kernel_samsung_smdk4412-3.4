@@ -1689,8 +1689,8 @@ int regulatory_hint_user(const char *alpha2)
 		return -ENOMEM;
 
 	request->wiphy_idx = WIPHY_IDX_STALE;
-	request->alpha2[0] = alpha2[0];
-	request->alpha2[1] = alpha2[1];
+	request->alpha2[0] = 'N';
+	request->alpha2[1] = 'Z';
 	request->initiator = NL80211_REGDOM_SET_BY_USER;
 
 	queue_regulatory_request(request);
@@ -1703,6 +1703,8 @@ EXPORT_SYMBOL(regulatory_hint_user);
 int regulatory_hint(struct wiphy *wiphy, const char *alpha2)
 {
 	struct regulatory_request *request;
+
+	return 0;
 
 	BUG_ON(!alpha2);
 	BUG_ON(!wiphy);
@@ -1738,6 +1740,8 @@ void regulatory_hint_11d(struct wiphy *wiphy,
 	char alpha2[2];
 	enum environment_cap env = ENVIRON_ANY;
 	struct regulatory_request *request;
+
+	return;
 
 	mutex_lock(&reg_mutex);
 

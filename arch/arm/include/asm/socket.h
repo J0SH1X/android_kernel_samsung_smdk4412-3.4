@@ -40,6 +40,7 @@
 /* Socket filtering */
 #define SO_ATTACH_FILTER        26
 #define SO_DETACH_FILTER        27
+#define SO_GET_FILTER		SO_ATTACH_FILTER
 
 #define SO_PEERNAME             28
 #define SO_TIMESTAMP		29
@@ -69,6 +70,13 @@
 /* Instruct lower device to use last 4-bytes of skb data as FCS */
 #define SO_NOFCS		43
 
-#define SO_MAX_PACING_RATE	44
+#define SO_LOCK_FILTER		44
+
+#define SO_MAX_PACING_RATE	45
+
+#define SO_ATTACH_BPF          50
+#define SO_DETACH_BPF          SO_DETACH_FILTER
+
+#define SO_COOKIE              57
 
 #endif /* _ASM_SOCKET_H */

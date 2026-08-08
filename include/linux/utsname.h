@@ -97,9 +97,49 @@ static inline void uts_proc_notify(enum uts_proc proc)
 }
 #endif
 
+#ifdef CONFIG_ANDROID_TREBLE_SPOOF_KERNEL_VERSION
+static struct new_utsname utsname_spoofed;
+#endif
 static inline struct new_utsname *utsname(void)
 {
+#ifdef CONFIG_ANDROID_TREBLE_SPOOF_KERNEL_VERSION
+#ifdef CONFIG_ANDROID_TREBLE_BYPASS_KERNEL_VERSION_CHECKS
+	if (!strcmp(current->comm, "system_server") ||
+		!strcmp(current->comm, "zygote") ||
+		!strcmp(current->comm, "bpfloader") ||
+		!strcmp(current->comm, "netbpfload") ||
+		!strcmp(current->comm, "perfetto") ||
+		!strcmp(current->comm, "init"))
+	{
+#endif
+		char fake_release_prepended[64];
+
+		if (!strcmp(current->comm, "bpfloader") ||
+			!strcmp(current->comm, "netbpfload"))
+			strcpy(fake_release_prepended, CONFIG_ANDROID_TREBLE_SPOOF_BPF_KERNEL_VERSION_PREFIX);
+		else
+			strcpy(fake_release_prepended, CONFIG_ANDROID_TREBLE_SPOOF_KERNEL_VERSION_PREFIX);
+
+		strcat(fake_release_prepended, "-");
+		strcat(fake_release_prepended, current->nsproxy->uts_ns->name.release);
+
+		utsname_spoofed = current->nsproxy->uts_ns->name;
+		strcpy(utsname_spoofed.release, fake_release_prepended);
+
+#ifdef CONFIG_ANDROID_TREBLE_SPOOF_BPF_KERNEL_BITNESS
+		if (!strcmp(current->comm, "bpfloader") ||
+			!strcmp(current->comm, "netbpfload"))
+				strcpy(utsname_spoofed.machine, "aarch64");
+#endif
+
+		return &utsname_spoofed;
+#ifdef CONFIG_ANDROID_TREBLE_BYPASS_KERNEL_VERSION_CHECKS
+	} else
+                return &current->nsproxy->uts_ns->name;
+#endif
+#else
 	return &current->nsproxy->uts_ns->name;
+#endif
 }
 
 static inline struct new_utsname *init_utsname(void)

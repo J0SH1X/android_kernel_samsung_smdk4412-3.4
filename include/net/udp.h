@@ -81,7 +81,7 @@ struct udp_table {
 extern struct udp_table udp_table;
 extern void udp_table_init(struct udp_table *, const char *);
 static inline struct udp_hslot *udp_hashslot(struct udp_table *table,
-					     struct net *net, unsigned num)
+					     struct net *net, unsigned int num)
 {
 	return &table->hash[udp_hashfn(net, num, table->mask)];
 }
@@ -185,6 +185,7 @@ extern int udp_push_pending_frames(struct sock *sk);
 extern void udp_flush_pending_frames(struct sock *sk);
 extern int udp_rcv(struct sk_buff *skb);
 extern int udp_ioctl(struct sock *sk, int cmd, unsigned long arg);
+extern int udp_pre_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 extern int udp_disconnect(struct sock *sk, int flags);
 extern unsigned int udp_poll(struct file *file, struct socket *sock,
 			     poll_table *wait);

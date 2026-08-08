@@ -20,7 +20,7 @@
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
-static bool debug;
+static int debug;
 
 struct usbcons_info {
 	int			magic;
@@ -195,6 +195,7 @@ static int usb_console_setup(struct console *co, char *options)
 	tty_kref_put(tty);
  reset_open_count:
 	port->port.count = 0;
+	info->port = NULL;
 	usb_autopm_put_interface(serial->interface);
  error_get_interface:
 	usb_serial_put(serial);

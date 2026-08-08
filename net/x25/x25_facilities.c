@@ -231,7 +231,7 @@ int x25_create_facilities(unsigned char *buffer,
 	}
 
 	if (dte_facs->calling_len && (facil_mask & X25_MASK_CALLING_AE)) {
-		unsigned bytecount = (dte_facs->calling_len + 1) >> 1;
+		unsigned int bytecount = (dte_facs->calling_len + 1) >> 1;
 		*p++ = X25_FAC_CALLING_AE;
 		*p++ = 1 + bytecount;
 		*p++ = dte_facs->calling_len;
@@ -240,7 +240,7 @@ int x25_create_facilities(unsigned char *buffer,
 	}
 
 	if (dte_facs->called_len && (facil_mask & X25_MASK_CALLED_AE)) {
-		unsigned bytecount = (dte_facs->called_len % 2) ?
+		unsigned int bytecount = (dte_facs->called_len % 2) ?
 		dte_facs->called_len / 2 + 1 :
 		dte_facs->called_len / 2;
 		*p++ = X25_FAC_CALLED_AE;
@@ -271,6 +271,7 @@ int x25_negotiate_facilities(struct sk_buff *skb, struct sock *sk,
 
 	memset(&theirs, 0, sizeof(theirs));
 	memcpy(new, ours, sizeof(*new));
+	memset(dte, 0, sizeof(*dte));
 
 	len = x25_parse_facilities(skb, &theirs, dte, &x25->vc_facil_mask);
 	if (len < 0)

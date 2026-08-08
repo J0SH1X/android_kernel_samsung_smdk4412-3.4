@@ -838,6 +838,18 @@ config DEBUG_BLK_CGROUP
 	Enable some debugging help. Currently it exports additional stat
 	files in a cgroup which can be useful for debugging.
 
+config CGROUP_BPF
+        bool "Support for eBPF programs attached to cgroups"
+        depends on BPF_SYSCALL
+        help
+          Allow attaching eBPF programs to a cgroup using the bpf(2)
+          syscall command BPF_PROG_ATTACH.
+
+          In which context these programs are accessed depends on the type
+          of attachment. For instance, programs that are attached using
+          BPF_CGROUP_INET_INGRESS will be executed on the ingress path of
+          inet sockets.
+
 endif # CGROUPS
 
 config CHECKPOINT_RESTORE
@@ -916,6 +928,43 @@ config SCHED_AUTOGROUP
 	  of workloads isolates aggressive CPU burners (like build jobs) from
 	  desktop applications.  Task group autogeneration is currently based
 	  upon task session.
+
+config ANDROID_TREBLE_SPOOF_KERNEL_VERSION
+	bool "TREBLE/BPF: report arbitrary kernel version to userspace"
+	default n
+	help
+		TREBLE: Workaround for system crash due to kernel version older than 3.17.
+
+		Android ART requires Linux 3.17 to use memfd_create() syscall and
+		fails if the kernel is too old. We already have backported memfd_create()
+		so we can mimic to 3.17+ kernel and properly run GSIs.
+
+		BPF: Since Android 12 iptables has been replaced by eBPF programs
+		which require eBPF features backported only to Linux 4.9.
+		Since we have eBPF backport in our 3.10 kernel, we can pretend to be
+		4.9.y for userspace to load bpf progs and successfully boot OS.
+
+config ANDROID_TREBLE_BYPASS_KERNEL_VERSION_CHECKS
+		bool "Report custom kernel version only when needed"
+		depends on ANDROID_TREBLE_SPOOF_KERNEL_VERSION
+		default n
+		help
+				Spoof kernel version only for system_server, bpfloader and perfetto.
+				User will see a real kernel version in /proc/version and Settings->About phone.
+
+config ANDROID_TREBLE_SPOOF_KERNEL_VERSION_PREFIX
+		string "Kernel version to prepend to real one"
+		depends on ANDROID_TREBLE_SPOOF_KERNEL_VERSION
+		default "3.17"
+
+config ANDROID_TREBLE_SPOOF_BPF_KERNEL_VERSION_PREFIX
+		string "Kernel version to prepend to real one for bpfloader"
+		depends on ANDROID_TREBLE_SPOOF_KERNEL_VERSION
+		default "4.9.337"
+
+config ANDROID_TREBLE_SPOOF_BPF_KERNEL_BITNESS
+		bool "Report aarch64 kernel to bpfloader"
+		default n
 
 config MM_OWNER
 	bool
@@ -1015,6 +1064,10 @@ config PANIC_TIMEOUT
 	default 0
 	help
 	  Set default panic timeout.
+
+# interpreter that classic socket filters depend on
+config BPF
+	bool
 
 menuconfig EXPERT
 	bool "Configure standard kernel features (expert users)"
@@ -1178,24 +1231,33 @@ config EVENTFD
 
 	  If unsure, say Y.
 
-choice
-	prompt "Default shmem filesystem implementation" if EMBEDDED
-	depends on MMU
-	default SHMEM
+# syscall, maps, verifier
+config BPF_SYSCALL
+	bool "Enable bpf() system call"
+	select ANON_INODES
+	select BPF
+	default n
 	help
-	  Choose the default shmem filesystem implementation to manage shared
-	  memory.
+	  Enable the bpf() system call that allows to manipulate eBPF
+	  programs and maps via file descriptors.
 
-	  If in doubt, select 'Full shmem filesystem'.
+config BPF_JIT_ALWAYS_ON
+	bool "Permanently enable BPF JIT and remove BPF interpreter"
+	depends on BPF_SYSCALL && HAVE_EBPF_JIT && BPF_JIT
+	help
+	  Enables BPF JIT and removes BPF interpreter to avoid
+	  speculative execution of BPF instructions by the interpreter
 
 config SHMEM
-	bool "Full shmem filesystem"
+	bool "Use full shmem filesystem" if EXPERT
+	default y
+	depends on MMU
 	help
 	  The shmem is an internal filesystem used to manage shared memory.
 	  It is backed by swap and manages resource limits. It is also exported
-	  to userspace as tmpfs if TMPFS is enabled. Choosing 'Tiny shmem
-	  filesystem' option replaces shmem and tmpfs with the much simpler
-	  ramfs code, which may be appropriate on small systems without swap.
+	  to userspace as tmpfs if TMPFS is enabled. Disabling this
+	  option replaces shmem and tmpfs with the much simpler ramfs code,
+	  which may be appropriate on small systems without swap.
 
 config TINY_SHMEM
 	bool "Tiny shmem filesystem" if !SWAP
@@ -1206,8 +1268,6 @@ config TINY_SHMEM
 	  shmem code (swap-backed and resource-limited) are outweighed by
  	  their complexity. On systems without swap this code should be
 	  effectively equivalent, but much lighter weight.
-
-endchoice
 
 config ASHMEM
 	bool "Enable the Anonymous Shared Memory Subsystem"

@@ -1546,6 +1546,87 @@ check_events:
 	return res;
 }
 
+static int ep_poll2(struct eventpoll *ep, struct epoll_event __user *events,
+		   int maxevents, struct timespec timeout, bool has_timeout)
+{
+	int res = 0, eavail, timed_out = 0;
+	unsigned long flags;
+	long slack = 0;
+	wait_queue_t wait;
+	ktime_t expires, *to = NULL;
+
+	if (has_timeout) {
+		struct timespec end_time, now;
+		ktime_get_ts(&now);
+		end_time = timespec_add_safe(now, timeout);
+		slack = select_estimate_accuracy(&end_time);
+		to = &expires;
+		*to = timespec_to_ktime(end_time);
+	} else if (!has_timeout) {
+		/*
+		 * Avoid the unnecessary trip to the wait queue loop, if the
+		 * caller specified a non blocking operation.
+		 */
+		timed_out = 1;
+		spin_lock_irqsave(&ep->lock, flags);
+		goto check_events;
+	}
+
+fetch_events:
+	spin_lock_irqsave(&ep->lock, flags);
+
+	if (!ep_events_available(ep)) {
+		/*
+		 * We don't have any available event to return to the caller.
+		 * We need to sleep here, and we will be wake up by
+		 * ep_poll_callback() when events will become available.
+		 */
+		init_waitqueue_entry(&wait, current);
+		__add_wait_queue_exclusive(&ep->wq, &wait);
+
+		for (;;) {
+			/*
+			 * We don't want to sleep if the ep_poll_callback() sends us
+			 * a wakeup in between. That's why we set the task state
+			 * to TASK_INTERRUPTIBLE before doing the checks.
+			 */
+			set_current_state(TASK_INTERRUPTIBLE);
+			if (ep_events_available(ep) || timed_out)
+				break;
+			if (signal_pending(current)) {
+				res = -EINTR;
+				break;
+			}
+
+			spin_unlock_irqrestore(&ep->lock, flags);
+			if (!freezable_schedule_hrtimeout_range(to, slack,
+								HRTIMER_MODE_ABS))
+				timed_out = 1;
+
+			spin_lock_irqsave(&ep->lock, flags);
+		}
+		__remove_wait_queue(&ep->wq, &wait);
+
+		set_current_state(TASK_RUNNING);
+	}
+check_events:
+	/* Is it worth to try to dig for events ? */
+	eavail = ep_events_available(ep);
+
+	spin_unlock_irqrestore(&ep->lock, flags);
+
+	/*
+	 * Try to transfer events to user space. In case we get 0 events and
+	 * there's still timeout left over, we go trying again in search of
+	 * more luck.
+	 */
+	if (!res && eavail &&
+	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
+		goto fetch_events;
+
+	return res;
+}
+
 /**
  * ep_loop_check_proc - Callback function to be passed to the @ep_call_nested()
  *                      API, to verify that adding an epoll file inside another
@@ -1593,9 +1674,11 @@ static int ep_loop_check_proc(void *priv, void *cookie, int call_nests)
 			 * not already there, and calling reverse_path_check()
 			 * during ep_insert().
 			 */
-			if (list_empty(&epi->ffd.file->f_tfile_llink))
-				list_add(&epi->ffd.file->f_tfile_llink,
-					 &tfile_check_list);
+			if (list_empty(&epi->ffd.file->f_tfile_llink)) {
+				if (get_file_rcu(epi->ffd.file))
+					list_add(&epi->ffd.file->f_tfile_llink,
+						 &tfile_check_list);
+			}
 		}
 	}
 	mutex_unlock(&ep->mtx);
@@ -1639,6 +1722,7 @@ static void clear_tfile_check_list(void)
 		file = list_first_entry(&tfile_check_list, struct file,
 					f_tfile_llink);
 		list_del_init(&file->f_tfile_llink);
+		fput(file);
 	}
 	INIT_LIST_HEAD(&tfile_check_list);
 }
@@ -1707,7 +1791,7 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 {
 	int error;
 	int did_lock_epmutex = 0;
-	struct file *file, *tfile;
+	struct fd f, tf;
 	struct eventpoll *ep;
 	struct epitem *epi;
 	struct epoll_event epds;
@@ -1717,15 +1801,14 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
 		goto error_return;
 
-	/* Get the "struct file *" for the eventpoll file */
 	error = -EBADF;
-	file = fget(epfd);
-	if (!file)
+	f = fdget(epfd);
+	if (!f.file)
 		goto error_return;
 
 	/* Get the "struct file *" for the target file */
-	tfile = fget(fd);
-	if (!tfile)
+	tf = fdget(fd);
+	if (!tf.file)
 		goto error_fput;
 
 #ifdef CONFIG_GOD_MODE
@@ -1733,7 +1816,7 @@ if (!god_mode_enabled) {
 #endif
 	/* The target file descriptor must support poll */
 	error = -EPERM;
-	if (!tfile->f_op || !tfile->f_op->poll)
+	if (!tf.file->f_op || !tf.file->f_op->poll)
 		goto error_tgt_fput;
 #ifdef CONFIG_GOD_MODE
 }
@@ -1749,14 +1832,14 @@ if (!god_mode_enabled) {
 	 * adding an epoll file descriptor inside itself.
 	 */
 	error = -EINVAL;
-	if (file == tfile || !is_file_epoll(file))
+	if (f.file == tf.file || !is_file_epoll(f.file))
 		goto error_tgt_fput;
 
 	/*
 	 * At this point it is safe to assume that the "private_data" contains
 	 * our own data structure.
 	 */
-	ep = file->private_data;
+	ep = f.file->private_data;
 
 	/*
 	 * When we insert an epoll file descriptor, inside another epoll file
@@ -1775,14 +1858,15 @@ if (!god_mode_enabled) {
 		did_lock_epmutex = 1;
 	}
 	if (op == EPOLL_CTL_ADD) {
-		if (is_file_epoll(tfile)) {
+		if (is_file_epoll(tf.file)) {
 			error = -ELOOP;
-			if (ep_loop_check(ep, tfile) != 0) {
-				clear_tfile_check_list();
+			if (ep_loop_check(ep, tf.file) != 0) {
 				goto error_tgt_fput;
 			}
-		} else
-			list_add(&tfile->f_tfile_llink, &tfile_check_list);
+		} else {
+			get_file(tf.file);
+			list_add(&tf.file->f_tfile_llink, &tfile_check_list);
+		}
 	}
 
 	mutex_lock_nested(&ep->mtx, 0);
@@ -1792,17 +1876,16 @@ if (!god_mode_enabled) {
 	 * above, we can be sure to be able to use the item looked up by
 	 * ep_find() till we release the mutex.
 	 */
-	epi = ep_find(ep, tfile, fd);
+	epi = ep_find(ep, tf.file, fd);
 
 	error = -EINVAL;
 	switch (op) {
 	case EPOLL_CTL_ADD:
 		if (!epi) {
 			epds.events |= POLLERR | POLLHUP;
-			error = ep_insert(ep, &epds, tfile, fd);
+			error = ep_insert(ep, &epds, tf.file, fd);
 		} else
 			error = -EEXIST;
-		clear_tfile_check_list();
 		break;
 	case EPOLL_CTL_DEL:
 		if (epi)
@@ -1821,12 +1904,14 @@ if (!god_mode_enabled) {
 	mutex_unlock(&ep->mtx);
 
 error_tgt_fput:
-	if (did_lock_epmutex)
+	if (did_lock_epmutex) {
+		clear_tfile_check_list();
 		mutex_unlock(&epmutex);
+	}
 
-	fput(tfile);
+	fdput(tf);
 error_fput:
-	fput(file);
+	fdput(f);
 error_return:
 
 	return error;
@@ -1924,6 +2009,121 @@ SYSCALL_DEFINE6(epoll_pwait, int, epfd, struct epoll_event __user *, events,
 			set_restore_sigmask();
 		} else
 			set_current_blocked(&sigsaved);
+	}
+
+	return error;
+}
+
+struct __kernel_timespec {
+	long long       tv_sec;                 /* seconds */
+	long long               tv_nsec;                /* nanoseconds */
+};
+
+int get_timespec(struct timespec *ts,
+		   const struct __kernel_timespec __user *uts)
+{
+	struct __kernel_timespec kts;
+	int ret;
+
+	ret = copy_from_user(&kts, uts, sizeof(kts));
+	if (ret)
+		return -EFAULT;
+
+	ts->tv_sec = (long)kts.tv_sec;
+	ts->tv_nsec = (long)kts.tv_nsec;
+
+	return 0;
+}
+
+int epoll_wait_ts(int epfd, struct epoll_event __user * events,
+		int maxevents, struct timespec timeout, bool has_timeout)
+{
+	int error;
+	struct file *file;
+	struct eventpoll *ep;
+
+	/* The maximum number of event must be greater than zero */
+	if (maxevents <= 0 || maxevents > EP_MAX_EVENTS)
+		return -EINVAL;
+
+	/* Verify that the area passed by the user is writeable */
+	if (!access_ok(VERIFY_WRITE, events, maxevents * sizeof(struct epoll_event))) {
+		error = -EFAULT;
+		goto error_return;
+	}
+
+	/* Get the "struct file *" for the eventpoll file */
+	error = -EBADF;
+	file = fget(epfd);
+	if (!file)
+		goto error_return;
+
+	/*
+	 * We have to check that the file structure underneath the fd
+	 * the user passed to us _is_ an eventpoll file.
+	 */
+	error = -EINVAL;
+	if (!is_file_epoll(file))
+		goto error_fput;
+
+	/*
+	 * At this point it is safe to assume that the "private_data" contains
+	 * our own data structure.
+	 */
+	ep = file->private_data;
+
+	/* Time to fish for events ... */
+	error = ep_poll2(ep, events, maxevents, timeout, has_timeout);
+
+error_fput:
+	fput(file);
+error_return:
+
+	return error;
+}
+
+SYSCALL_DEFINE6(epoll_pwait2, int, epfd, struct epoll_event __user *, events,
+		int, maxevents, const struct __kernel_timespec __user *, timeout,
+		const sigset_t __user *, sigmask, size_t, sigsetsize)
+{
+	int error;
+	sigset_t ksigmask, sigsaved;
+
+	struct timespec ts;
+
+	if (timeout) {
+		if (get_timespec(&ts, timeout))
+			return -EFAULT;
+	}
+
+	/*
+	 * If the caller wants a certain signal mask to be set during the wait,
+	 * we apply it here.
+	 */
+	if (sigmask) {
+		if (sigsetsize != sizeof(sigset_t))
+			return -EINVAL;
+		if (copy_from_user(&ksigmask, sigmask, sizeof(ksigmask)))
+			return -EFAULT;
+		sigdelsetmask(&ksigmask, sigmask(SIGKILL) | sigmask(SIGSTOP));
+		sigprocmask(SIG_SETMASK, &ksigmask, &sigsaved);
+	}
+
+	error = epoll_wait_ts(epfd, events, maxevents, ts, (timeout ? true : false));
+
+	/*
+	 * If we changed the signal mask, we need to restore the original one.
+	 * In case we've got a signal while waiting, we do not restore the
+	 * signal mask yet, and we allow do_signal() to deliver the signal on
+	 * the way back to userspace, before the signal mask is restored.
+	 */
+	if (sigmask) {
+		if (error == -EINTR) {
+			memcpy(&current->saved_sigmask, &sigsaved,
+			       sizeof(sigsaved));
+			set_restore_sigmask();
+		} else
+			sigprocmask(SIG_SETMASK, &sigsaved, NULL);
 	}
 
 	return error;

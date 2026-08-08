@@ -1507,15 +1507,82 @@ int rmnet_usb_ctrl_init(void)
 			kfree(ctrl_dev[n]);
 			goto error2;
 		}
-		/*create /sys/class/hsicctl/hsicctlx/modem_wait*/
-		status = device_create_file(ctrl_dev[n]->devicep,
-					&dev_attr_modem_wait);
-		if (status) {
-			device_destroy(ctrldev_classp,
-				MKDEV(MAJOR(ctrldev_num), n));
-			cdev_del(&ctrl_dev[n]->cdev);
-			kfree(ctrl_dev[n]);
-			goto error2;
+
+		for (n = 0; n < insts_per_dev; n++) {
+			dev = &ctrl_devs[i][n];
+
+			/*for debug purpose*/
+			snprintf(dev->name, CTRL_DEV_MAX_LEN, "%s%d",
+				 rmnet_dev_names[i], n);
+
+			dev->wq = create_singlethread_workqueue(dev->name);
+			if (!dev->wq) {
+				pr_err("unable to allocate workqueue");
+				kfree(dev);
+				return -ENOMEM;
+			}
+
+			dev->ch_id = n;
+
+			mutex_init(&dev->dev_lock);
+			spin_lock_init(&dev->rx_lock);
+			init_waitqueue_head(&dev->read_wait_queue);
+			init_waitqueue_head(&dev->open_wait_queue);
+			INIT_LIST_HEAD(&dev->rx_list);
+			init_usb_anchor(&dev->tx_submitted);
+			init_usb_anchor(&dev->rx_submitted);
+			INIT_WORK(&dev->get_encap_work, get_encap_work);
+
+			cdev_init(&dev->cdev, &ctrldev_fops);
+			dev->cdev.owner = THIS_MODULE;
+
+			status = cdev_add(&dev->cdev, (ctrldev_num[i] + n), 1);
+			if (status) {
+				pr_err("%s: cdev_add() ret %i\n", __func__,
+					status);
+				destroy_workqueue(dev->wq);
+				kfree(dev);
+				return status;
+			}
+
+			dev->devicep = device_create(ctrldev_classp[i], NULL,
+						     (ctrldev_num[i] + n), NULL,
+						     "%s%d", rmnet_dev_names[i],
+						     n);
+			if (IS_ERR(dev->devicep)) {
+				long status = PTR_ERR(dev->devicep);
+				pr_err("%s: device_create() returned %ld\n",
+					__func__, status);
+				cdev_del(&dev->cdev);
+				destroy_workqueue(dev->wq);
+				kfree(dev);
+				return status;
+			}
+
+			/*create /sys/class/hsicctl/hsicctlx/modem_wait*/
+			status = device_create_file(dev->devicep,
+						    &dev_attr_modem_wait);
+			if (status) {
+				device_destroy(dev->devicep->class,
+					       dev->devicep->devt);
+				cdev_del(&dev->cdev);
+				destroy_workqueue(dev->wq);
+				kfree(dev);
+				return status;
+			}
+			dev_set_drvdata(dev->devicep, dev);
+
+			status = rmnet_usb_ctrl_alloc_rx(dev);
+			if (status) {
+				device_remove_file(dev->devicep,
+						   &dev_attr_modem_wait);
+				device_destroy(dev->devicep->class,
+					       dev->devicep->devt);
+				cdev_del(&dev->cdev);
+				destroy_workqueue(dev->wq);
+				kfree(dev);
+				return status;
+			}
 		}
 		dev_set_drvdata(ctrl_dev[n]->devicep, ctrl_dev[n]);
 	}

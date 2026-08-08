@@ -205,7 +205,14 @@ extern void sec_debug_aux_log(int idx, char *fmt, ...);
 #endif
 
 #if defined(CONFIG_MACH_Q1_BD)
+#ifdef CONFIG_SEC_DEBUG
 extern int sec_debug_panic_handler_safe(void *buf);
+#else
+static inline int sec_debug_panic_handler_safe(void *buf)
+{
+	return 0;
+}
+#endif
 #endif
 
 extern void read_lcd_register(void);

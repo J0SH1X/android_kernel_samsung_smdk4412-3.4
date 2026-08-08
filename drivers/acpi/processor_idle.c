@@ -1200,7 +1200,15 @@ int acpi_processor_power_exit(struct acpi_processor *pr,
 	if (disabled_by_idle_boot_param())
 		return 0;
 
-	cpuidle_unregister_device(&pr->power.dev);
+	if (pr->flags.power) {
+		cpuidle_unregister_device(&pr->power.dev);
+		acpi_processor_registered--;
+		if (acpi_processor_registered == 0)
+			cpuidle_unregister_driver(&acpi_idle_driver);
+
+		kfree(dev);
+	}
+
 	pr->flags.power_setup_done = 0;
 
 	return 0;

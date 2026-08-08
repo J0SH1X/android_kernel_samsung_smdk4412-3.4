@@ -321,6 +321,7 @@ static void sec_keyboard_disconnect(struct serio *serio)
 {
 	struct sec_keyboard_drvdata *data = serio_get_drvdata(serio);
 	printk(KERN_DEBUG "[Keyboard] %s", __func__);
+    msleep(5000);
 	data->tx_ready = false;
 	serio_close(serio);
 }
@@ -342,6 +343,7 @@ static void keyboard_fb_suspend(struct sec_keyboard_drvdata *data)
 		if (data->univ_kbd_dock == false)
 			sec_keyboard_tx(data, 0x10);	/* the idle mode */
 	}
+    printk(KERN_DEBUG "[Keyboard] %s\n", __func__);
 	data->fb_suspended = true;
 }
 
@@ -352,7 +354,7 @@ static void keyboard_fb_resume(struct sec_keyboard_drvdata *data)
 
 	if (data->kl != UNKOWN_KEYLAYOUT)
 		printk(KERN_DEBUG "[Keyboard] %s\n", __func__);
-
+    printk(KERN_DEBUG "[Keyboard] %s\n", __func__);
     data->fb_suspended = false;
 }
 

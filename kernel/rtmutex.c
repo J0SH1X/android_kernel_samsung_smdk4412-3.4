@@ -618,19 +618,25 @@ static void wakeup_next_waiter(struct rt_mutex *lock)
  *
  * Must be called with lock->wait_lock held and
  * have just failed to try_to_take_rt_mutex().
+ *
+ * When invoked from rt_mutex_start_proxy_lock() waiter::task != current !
  */
 static void remove_waiter(struct rt_mutex *lock,
 			  struct rt_mutex_waiter *waiter)
 {
 	int first = (waiter == rt_mutex_top_waiter(lock));
 	struct task_struct *owner = rt_mutex_owner(lock);
+	struct task_struct *waiter_task = waiter->task;
 	struct rt_mutex *next_lock = NULL;
 	unsigned long flags;
 
-	raw_spin_lock_irqsave(&current->pi_lock, flags);
-	plist_del(&waiter->list_entry, &lock->wait_list);
-	current->pi_blocked_on = NULL;
-	raw_spin_unlock_irqrestore(&current->pi_lock, flags);
+	if (!waiter_task) /* never enqueued */
+		return;
+
+	scoped_guard(raw_spinlock_irqsave, &waiter_task->pi_lock) {
+		plist_del(&waiter->list_entry, &lock->wait_list);
+		waiter_task->pi_blocked_on = NULL;
+	}
 
 	if (!owner)
 		return;
@@ -1164,7 +1170,7 @@ int rt_mutex_start_proxy_lock(struct rt_mutex *lock,
 		ret = 0;
 	}
 
-	if (unlikely(ret))
+	if (unlikely(ret < 0))
 		remove_waiter(lock, waiter);
 
 	raw_spin_unlock(&lock->wait_lock);
