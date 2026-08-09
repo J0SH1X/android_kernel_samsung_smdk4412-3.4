@@ -964,10 +964,6 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 	sector_t end_block;
 	int ret = 0;		/* Will call free_more_memory() */
 
-#ifdef CONFIG_DMA_CMA
-	page = find_or_create_page(inode->i_mapping, index,
-		(mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS));
-#else
 	page = find_or_create_page(inode->i_mapping, index,
 		(mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS) | gfp);
 	if (!page)
@@ -1011,6 +1007,7 @@ failed:
 	page_cache_release(page);
 	return ret;
 }
+
 
 /*
  * Create buffers for the specified block device block's page.  If

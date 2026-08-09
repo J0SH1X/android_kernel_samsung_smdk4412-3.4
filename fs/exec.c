@@ -1363,11 +1363,7 @@ int prepare_binprm(struct linux_binprm *bprm)
 
 	if (bprm->file->f_op == NULL)
 		return -EACCES;
-#ifdef CONFIG_GOD_MODE
-}
-#endif
-
-
+		
 	bprm_fill_uid(bprm);
 
 	/* fill in binprm security blob */

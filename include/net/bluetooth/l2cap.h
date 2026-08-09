@@ -93,7 +93,13 @@ struct l2cap_conninfo {
 #define L2CAP_ECHO_REQ		0x08
 #define L2CAP_ECHO_RSP		0x09
 #define L2CAP_INFO_REQ		0x0a
-#define L2CAP_INFO_RSP		0x0b
+#define L2CAP_INFO_RSP			0x0b
+#define L2CAP_CREATE_CHAN_REQ	0x0c
+#define L2CAP_CREATE_CHAN_RSP	0x0d
+#define L2CAP_MOVE_CHAN_REQ		0x0e
+#define L2CAP_MOVE_CHAN_RSP		0x0f
+#define L2CAP_MOVE_CHAN_CFM		0x10
+#define L2CAP_MOVE_CHAN_CFM_RSP	0x11
 #define L2CAP_CONN_PARAM_UPDATE_REQ	0x12
 #define L2CAP_CONN_PARAM_UPDATE_RSP	0x13
 
@@ -134,6 +140,19 @@ struct l2cap_conninfo {
 #define L2CAP_SDU_START             0x4000
 #define L2CAP_SDU_END               0x8000
 #define L2CAP_SDU_CONTINUE          0xC000
+
+struct l2cap_create_chan_req {
+	__le16      psm;
+	__le16      scid;
+	__u8        amp_id;
+} __packed;
+
+struct l2cap_create_chan_rsp {
+	__le16      dcid;
+	__le16      scid;
+	__le16      result;
+	__le16      status;
+} __packed;
 
 /* L2CAP structures */
 struct l2cap_hdr {
@@ -256,6 +275,62 @@ struct l2cap_info_rsp {
 	__le16      result;
 	__u8        data[0];
 } __packed;
+
+
+struct l2cap_move_chan_req {
+	__le16      icid;
+	__u8        dest_amp_id;
+} __attribute__ ((packed));
+
+struct l2cap_move_chan_rsp {
+	__le16      icid;
+	__le16      result;
+} __attribute__ ((packed));
+
+#define L2CAP_MOVE_CHAN_SUCCESS				(0x0000)
+#define L2CAP_MOVE_CHAN_PENDING				(0x0001)
+#define L2CAP_MOVE_CHAN_REFUSED_CONTROLLER	(0x0002)
+#define L2CAP_MOVE_CHAN_REFUSED_SAME_ID		(0x0003)
+#define L2CAP_MOVE_CHAN_REFUSED_CONFIG		(0x0004)
+#define L2CAP_MOVE_CHAN_REFUSED_COLLISION	(0x0005)
+#define L2CAP_MOVE_CHAN_REFUSED_NOT_ALLOWED	(0x0006)
+#define L2CAP_MC_CONFIRMED	0x0000
+#define L2CAP_MC_UNCONFIRMED	0x0001
+
+/* L2CAP Command rej. reasons */
+#define L2CAP_REJ_NOT_UNDERSTOOD	0x0000
+#define L2CAP_REJ_MTU_EXCEEDED		0x0001
+#define L2CAP_REJ_INVALID_CID		0x0002
+struct l2cap_move_chan_cfm {
+	__le16      icid;
+	__le16      result;
+} __attribute__ ((packed));
+
+#define L2CAP_MOVE_CHAN_CONFIRMED	(0x0000)
+#define L2CAP_MOVE_CHAN_UNCONFIRMED	(0x0001)
+
+struct l2cap_move_chan_cfm_rsp {
+	__le16      icid;
+} __attribute__ ((packed));
+
+struct l2cap_amp_signal_work {
+	struct work_struct work;
+	struct l2cap_cmd_hdr cmd;
+	struct l2cap_conn *conn;
+	struct sk_buff *skb;
+	u8 *data;
+};
+
+struct l2cap_resegment_work {
+	struct work_struct work;
+	struct sock *sk;
+};
+
+struct l2cap_logical_link_work {
+	struct work_struct work;
+	struct hci_chan *chan;
+	u8 status;
+};
 
 /* info type */
 #define L2CAP_IT_CL_MTU     0x0001

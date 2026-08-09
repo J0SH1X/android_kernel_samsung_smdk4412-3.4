@@ -2767,6 +2767,7 @@ static inline int l2cap_config_rsp(struct l2cap_conn *conn,
 {
 	struct l2cap_conf_rsp *rsp = (struct l2cap_conf_rsp *)data;
 	u16 scid, flags, result;
+	struct sock *sk;
 	struct l2cap_chan *chan;
 	int len = cmd_len - sizeof(*rsp);
 
@@ -3044,15 +3045,12 @@ static inline int l2cap_create_channel_req(struct l2cap_conn *conn,
 					struct l2cap_cmd_hdr *cmd, u16 cmd_len,
 					void *data)
 {
-	struct l2cap_create_chan_req *req = data;
+	struct l2cap_create_chan_req *req = (struct l2cap_create_chan_req *)data;
 	struct l2cap_create_chan_rsp rsp;
 	u16 psm, scid;
 
 	if (cmd_len != sizeof(*req))
 		return -EPROTO;
-
-	if (!enable_hs)
-		return -EINVAL;
 
 	psm = le16_to_cpu(req->psm);
 	scid = le16_to_cpu(req->scid);
@@ -3127,7 +3125,7 @@ static inline int l2cap_move_channel_req(struct l2cap_conn *conn,
 {
 	struct l2cap_move_chan_req *req = data;
 	u16 icid = 0;
-	u16 result = L2CAP_MR_NOT_ALLOWED;
+	u16 result = L2CAP_MOVE_CHAN_REFUSED_NOT_ALLOWED;
 
 	if (cmd_len != sizeof(*req))
 		return -EPROTO;
@@ -3136,8 +3134,8 @@ static inline int l2cap_move_channel_req(struct l2cap_conn *conn,
 
 	BT_DBG("icid %d, dest_amp_id %d", icid, req->dest_amp_id);
 
-	if (!enable_hs)
-		return -EINVAL;
+	// if (!enable_hs)
+	// 	return -EINVAL;
 
 	/* Placeholder: Always refuse */
 	l2cap_send_move_chan_rsp(conn, cmd->ident, icid, result);
@@ -3187,7 +3185,7 @@ static inline int l2cap_move_channel_confirm(struct l2cap_conn *conn,
 static inline int l2cap_move_channel_confirm_rsp(struct l2cap_conn *conn,
 			struct l2cap_cmd_hdr *cmd, u16 cmd_len, void *data)
 {
-	struct l2cap_move_chan_cfm_rsp *rsp = data;
+	struct l2cap_move_chan_cfm_rsp *rsp = (struct l2cap_move_chan_cfm_rsp *)data;
 	u16 icid;
 
 	if (cmd_len != sizeof(*rsp))

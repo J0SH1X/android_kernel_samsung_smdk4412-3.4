@@ -282,11 +282,6 @@ out_release_group:
 	put_group_info(group_info);
 	return ret;
 }
-
-out_release_group:
-	put_group_info(group_info);
-	return ret;
-}
 EXPORT_SYMBOL_GPL(ping_init_sock);
 
 void ping_close(struct sock *sk, long timeout)

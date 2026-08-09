@@ -1260,11 +1260,6 @@ static void perf_retry_remove(struct perf_event *event)
 }
 #endif
 
-struct remove_event {
-	struct perf_event *event;
-	bool detach_group;
-};
-
 /*
  * Remove the event from a task's (or a CPU's) list of events.
  *

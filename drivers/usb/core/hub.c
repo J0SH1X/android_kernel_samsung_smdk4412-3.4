@@ -2077,6 +2077,7 @@ static unsigned hub_is_wusb(struct usb_hub *hub)
 
 #define HUB_ROOT_RESET_TIME	50	/* times are in msec */
 #define HUB_SHORT_RESET_TIME	10
+#define HUB_BH_RESET_TIME	50
 #define HUB_LONG_RESET_TIME	200
 #define HUB_RESET_TIMEOUT	800
 
@@ -2148,10 +2149,11 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 
 /* Handle port reset and port warm(BH) reset (for USB3 protocol ports) */
 static int hub_port_reset(struct usb_hub *hub, int port1,
-				struct usb_device *udev, unsigned int delay)
+				struct usb_device *udev, unsigned int delay, bool warm)
 {
 	int i, status;
 	struct usb_hcd *hcd;
+	u16 portchange, portstatus;
 
 	if (!hub_is_superspeed(hub->hdev)) {
 		if (warm) {
@@ -2224,9 +2226,6 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 						port1);
 				warm = true;
 			}
-			/* FALL THROUGH */
-		case -ENOTCONN:
-		case -ENODEV:
 			clear_port_feature(hub->hdev,
 				port1, USB_PORT_FEAT_C_RESET);
 			/* FIXME need disconnect() for NOTATTACHED device */
@@ -2968,7 +2967,7 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 
 	/* Reset the device; full speed may morph to high speed */
 	/* FIXME a USB 2.0 device may morph into SuperSpeed on reset. */
-	retval = hub_port_reset(hub, port1, udev, delay);
+	retval = hub_port_reset(hub, port1, udev, delay,false);
 	if (retval < 0)		/* error or disconnect */
 		goto fail;
 	/* success, speed is known */
@@ -3100,7 +3099,7 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 
 			if (!(udev->quirks & USB_QUIRK_HSIC_TUNE)) {
 				retval =
-				hub_port_reset(hub, port1, udev, delay);
+				hub_port_reset(hub, port1, udev, delay,false);
 				if (retval < 0)	/* error or disconnect */
 					goto fail;
 			}
@@ -3751,6 +3750,8 @@ static void hub_events(void)
 			if (hub_is_superspeed(hub->hdev) &&
 				(portstatus & USB_PORT_STAT_LINK_STATE)
 					== USB_SS_PORT_LS_SS_INACTIVE) {
+				int status;
+				struct usb_device *udev = hub->hdev->children[i - 1];
 				dev_dbg(hub_dev, "warm reset port %d\n", i);
 				if (!udev ||
 				    !(portstatus & USB_PORT_STAT_CONNECTION) ||

@@ -178,7 +178,7 @@ static int freezer_can_attach(struct cgroup_subsys *ss,
 	return 0;
 }
 
-static void freezer_fork(struct cgroup_subsys *ss, struct task_struct *task)
+static void freezer_fork(struct task_struct *task)
 {
 	struct freezer *freezer;
 
